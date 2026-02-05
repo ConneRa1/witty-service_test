@@ -46,11 +46,25 @@ export const Messages: React.FC<MessagesProps> = React.memo(
   },
   (prevProps, nextProps) => {
     // Prevent re-renders if messages are the same length
-    if (prevProps.messages.length !== nextProps.messages.length) {
+    const prevLen = prevProps.messages.length;
+    const nextLen = nextProps.messages.length;
+
+    if (prevLen !== nextLen) {
       return false;
     }
 
-    return true;
+    if (prevLen === 0) {
+      return true;
+    }
+
+    const prevLast = prevProps.messages[prevLen - 1];
+    const nextLast = nextProps.messages[nextLen - 1];
+
+    if (prevLast.id !== nextLast.id) {
+      return false;
+    }
+
+    return prevLast === nextLast;
   },
 );
 
