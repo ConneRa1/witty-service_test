@@ -261,6 +261,16 @@ class SkillRepoService:
         self, repo_id: str, *, include_content: bool = False
     ) -> list[SkillDiscoveryItem]:
         stored = await self._get_owned_repo(repo_id)
+        user_id = await self._require_user_id()
+        result = await self.db_session.execute(
+            select(StoredSkillRepoDiscoveryCache).where(
+                StoredSkillRepoDiscoveryCache.user_id == user_id,
+                StoredSkillRepoDiscoveryCache.repo_id == repo_id,
+            )
+        )
+        cached = result.scalar_one_or_none()
+        if cached is not None and cached.discover_status == 'discovering':
+            raise ValueError('Skill repo discovery is already in progress')
         await self._set_discovery_status(stored, 'discovering')
         try:
             repo_skills = self._discover_repo_skills(stored)

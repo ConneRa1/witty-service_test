@@ -137,6 +137,10 @@ async def discover_one_repo_skill(
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ValueError as exc:
+        if str(exc) == 'Skill repo discovery is already in progress':
+            raise HTTPException(status.HTTP_202_ACCEPTED, detail=str(exc)) from exc
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     return SkillRepoDiscoverPage(items=items)
 
 
