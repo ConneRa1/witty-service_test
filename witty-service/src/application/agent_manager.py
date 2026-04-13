@@ -14,6 +14,7 @@ from src.domain.enums import AgentStatus, can_transition
 from src.domain.errors import DomainError
 from src.persistence.repositories import AgentRecord, SessionRecord
 from src.sandbox.base import SandboxHandle, sandbox_not_found
+from src.storage.runtime_backup import RuntimeBackupStore
 from .session_manager import SessionManager
 
 INVALID_AGENT_TRANSITION = "INVALID_AGENT_TRANSITION"
@@ -397,30 +398,42 @@ class AgentManager:
         finally:
             await adaptor_client.close()
 
-    def delete_agent(self, agent_id: str) -> None:
+    async def delete_agent(self, agent_id: str) -> None:
         agent = self._get_agent(agent_id)
         sandbox_state = self._repository.get_sandbox_state(agent_id)
 
-        if agent.status in {AgentStatus.running, AgentStatus.paused} and sandbox_state is None:
-            raise sandbox_not_found(sandbox_type=agent.sandbox_type, sandbox_id=agent_id)
         cleanup_errors: list[dict[str, str]] = []
 
+        # 1. 备份运行时
+        if sandbox_state is not None:
+            self._collect_error(
+                cleanup_errors,
+                "runtime_backup",
+                lambda: self._backup_runtime(agent_id, agent.adapter_type),
+            )
+
+        # 2. 停止运行时
+        if agent.status in {AgentStatus.running, AgentStatus.paused}:
+            try:
+                await self._stop_runtime(agent_id)
+            except Exception as exc:
+                cleanup_errors.append({"stage": "runtime_stop", "error": self._error_message(exc)})
+
+        # 3. 清理沙箱
         if sandbox_state is not None:
             self._collect_error(
                 cleanup_errors,
                 "sandbox_cleanup",
-                lambda: self._sandbox_backend.cleanup(sandbox_state.handle),
+                lambda: self._cleanup_sandbox(agent_id),
             )
 
+        # 4. 保留 workspace 目录（不清除）
+
+        # 5. 更新 agent 状态
         self._collect_error(
             cleanup_errors,
-            "workspace_cleanup",
-            lambda: self._workspace_store.cleanup_workspace(agent_id),
-        )
-        self._collect_error(
-            cleanup_errors,
-            "agent_delete",
-            lambda: self._repository.delete_agent(agent_id),
+            "agent_status",
+            lambda: self._repository.update_agent_status(agent_id, AgentStatus.deleted),
         )
 
         if cleanup_errors:
@@ -515,6 +528,31 @@ class AgentManager:
         """获取到 witty-agent-server 的 HTTP 客户端"""
         sandbox_state = self._get_sandbox_state(agent_id)
         return AdaptorHttpClient(base_url=sandbox_state.adapter_base_url)
+
+    def _backup_runtime(self, agent_id: str, runtime_type: str = "openclaw") -> Path | None:
+        """备份运行时文件"""
+        backup_store = RuntimeBackupStore()
+        try:
+            return backup_store.backup(agent_id, runtime_type)
+        except Exception:
+            return None
+
+    def _cleanup_sandbox(self, agent_id: str) -> None:
+        """清理沙箱"""
+        sandbox_state = self._repository.get_sandbox_state(agent_id)
+        if sandbox_state is not None:
+            self._sandbox_backend.cleanup(sandbox_state.handle)
+
+    async def _stop_runtime(self, agent_id: str) -> None:
+        """停止 witty-agent-server 运行时"""
+        adaptor_client = self._get_adaptor_http_client(agent_id)
+        try:
+            try:
+                await adaptor_client.post("/agent/stop", json={})
+            except httpx.HTTPStatusError:
+                pass  # 可能已经停止
+        finally:
+            await adaptor_client.close()
 
     def _compensate_sandbox_state(
         self,
