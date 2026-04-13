@@ -15,6 +15,7 @@ from src.persistence.orm import (
     AgentRuntimeStateORM,
     MessageEventORM,
     MessageORM,
+    ModelORM,
     SessionORM,
     SessionStatus,
 )
@@ -34,6 +35,22 @@ class AgentRecord:
     idle_timeout_seconds: int
     has_scheduled_tasks: bool
     last_active_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(slots=True)
+class ModelRecord:
+    id: str
+    name: str
+    provider: str
+    api_key: str
+    api_base_url: str | None
+    description: str
+    enabled: bool
+    max_tokens: int
+    temperature: float
+    is_default: bool
     created_at: datetime
     updated_at: datetime
 
@@ -431,4 +448,99 @@ class SqliteRepository:
             adapter_base_url=row.adapter_base_url,
             adapter_ready=row.adapter_ready,
             last_error=row.last_error,
+        )
+
+    def create_model(
+        self,
+        *,
+        name: str,
+        provider: str,
+        api_key: str,
+        api_base_url: str | None = None,
+        description: str = "",
+        enabled: bool = True,
+        max_tokens: int = 4096,
+        temperature: float = 0.7,
+        is_default: bool = False,
+    ) -> ModelRecord:
+        return self.create_model_with_id(
+            model_id=str(uuid4()),
+            name=name,
+            provider=provider,
+            api_key=api_key,
+            api_base_url=api_base_url,
+            description=description,
+            enabled=enabled,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            is_default=is_default,
+        )
+
+    def create_model_with_id(
+        self,
+        *,
+        model_id: str,
+        name: str,
+        provider: str,
+        api_key: str,
+        api_base_url: str | None = None,
+        description: str = "",
+        enabled: bool = True,
+        max_tokens: int = 4096,
+        temperature: float = 0.7,
+        is_default: bool = False,
+    ) -> ModelRecord:
+        with self._session_factory() as session:
+            row = ModelORM(
+                id=model_id,
+                name=name,
+                provider=provider,
+                api_key=api_key,
+                api_base_url=api_base_url,
+                description=description,
+                enabled=enabled,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                is_default=is_default,
+            )
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+            return self._to_model_record(row)
+
+    def list_models(self) -> list[ModelRecord]:
+        with self._session_factory() as session:
+            rows = session.query(ModelORM).order_by(ModelORM.created_at.asc()).all()
+            return [self._to_model_record(row) for row in rows]
+
+    def get_model(self, model_id: str) -> ModelRecord | None:
+        with self._session_factory() as session:
+            row = session.get(ModelORM, model_id)
+            if row is None:
+                return None
+            return self._to_model_record(row)
+
+    def delete_model(self, model_id: str) -> None:
+        with self._session_factory() as session:
+            row = session.get(ModelORM, model_id)
+            if row is None:
+                return
+            session.delete(row)
+            session.commit()
+
+    @staticmethod
+    def _to_model_record(row: ModelORM) -> ModelRecord:
+        return ModelRecord(
+            id=row.id,
+            name=row.name,
+            provider=row.provider,
+            api_key=row.api_key,
+            api_base_url=row.api_base_url,
+            description=row.description,
+            enabled=row.enabled,
+            max_tokens=row.max_tokens,
+            temperature=row.temperature,
+            is_default=row.is_default,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
         )

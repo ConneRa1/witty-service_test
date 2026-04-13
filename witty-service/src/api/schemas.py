@@ -55,6 +55,34 @@ class MessageEventsResponse(BaseModel):
     events: list[dict[str, Any]]
 
 
+class CreateModelRequest(BaseModel):
+    name: str = Field(min_length=1)
+    provider: str = Field(min_length=1)
+    api_key: str = Field(min_length=1)
+    api_base_url: str | None = None
+    description: str = ""
+    enabled: bool = True
+    max_tokens: int = 4096
+    temperature: float = 0.7
+    is_default: bool = False
+
+
+class ModelResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    name: str
+    provider: str
+    api_base_url: str | None
+    description: str
+    enabled: bool
+    max_tokens: int
+    temperature: float
+    is_default: bool
+    created_at: datetime
+    updated_at: datetime
+
+
 class SessionEventItem(BaseModel):
     id: str
     session_id: str

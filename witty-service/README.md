@@ -78,6 +78,9 @@ curl -s http://127.0.0.1:8000/healthz
 | `/api/v1/agents/{agent_id}/sessions/{session_id}` | `DELETE` | 删除会话 |
 | `/api/v1/agents/{agent_id}/sessions/{session_id}/messages` | `POST` | 发送消息 |
 | `/api/v1/agents/{agent_id}/sessions/{session_id}/messages/stream` | `POST` | 发送消息并以 SSE 流返回 |
+| `/api/v1/models` | `POST` | 添加大模型配置 |
+| `/api/v1/models` | `GET` | 获取大模型列表 |
+| `/api/v1/models/{model_id}` | `DELETE` | 删除大模型配置 |
 | `/api/v1/agents/{agent_id}/sessions/{session_id}/events` | `GET` | 查询会话事件回放 |
 
 ### 3.3 Agent 生命周期接口
@@ -436,6 +439,128 @@ data: {"sandbox_type":"local_process","event":{"type":"message.delta","session_i
 | `session.runtime.changed` | runtime session 标识变化 | runtime 原始字段 |
 | `stream.error` | 运行时流异常 | `code`, `message` |
 | `client.error` | 客户端事件错误 | `code`, `message`, `details` |
+
+### 3.6 大模型配置接口
+
+#### 1. `POST /api/v1/models`
+
+- 接口描述：添加新的大模型配置
+- 输入（CreateModelRequest）：
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `name` | string | 是 | 模型名称，如 `gpt-4o`、`claude-3-opus-20240229` |
+| `provider` | string | 是 | 模型提供商：`openai`、`anthropic`、`google`、`ollama`、`azure`、`deepseek`、`glm`、`minimax`、`kimi`、`custom` |
+| `api_key` | string | 是 | API 密钥 |
+| `api_base_url` | string | 否 | API 基础地址，默认根据 provider 自动设置 |
+| `description` | string | 否 | 模型描述，默认空字符串 |
+| `enabled` | boolean | 否 | 是否启用，默认 `true` |
+| `max_tokens` | integer | 否 | 最大输出 tokens 数，默认 4096 |
+| `temperature` | number | 否 | 生成温度，范围 0-2，默认 0.7 |
+| `is_default` | boolean | 否 | 是否设为默认模型，默认 `false` |
+
+- 输出 `201`（ModelResponse）：
+
+```json
+{
+  "id": "model-uuid",
+  "name": "gpt-4o",
+  "provider": "openai",
+  "api_base_url": "https://api.openai.com/v1",
+  "description": "OpenAI GPT-4 Omni 模型",
+  "enabled": true,
+  "max_tokens": 4096,
+  "temperature": 0.7,
+  "is_default": true,
+  "created_at": "2026-04-13T10:00:00",
+  "updated_at": "2026-04-13T10:00:00"
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `id` | string | 模型配置唯一标识 |
+| `name` | string | 模型名称 |
+| `provider` | string | 模型提供商 |
+| `api_base_url` | string | API 基础地址 |
+| `description` | string | 模型描述 |
+| `enabled` | boolean | 是否启用 |
+| `max_tokens` | integer | 最大输出 tokens 数 |
+| `temperature` | number | 生成温度 |
+| `is_default` | boolean | 是否为默认模型 |
+| `created_at` | datetime | 创建时间 |
+| `updated_at` | datetime | 更新时间 |
+
+#### 2. `GET /api/v1/models`
+
+- 接口描述：获取所有大模型配置列表
+- 输出 `200`：`list[ModelResponse]`
+
+```json
+[
+  {
+    "id": "model-uuid-1",
+    "name": "gpt-4o",
+    "provider": "openai",
+    "api_base_url": "https://api.openai.com/v1",
+    "description": "OpenAI GPT-4 Omni 模型",
+    "enabled": true,
+    "max_tokens": 4096,
+    "temperature": 0.7,
+    "is_default": true,
+    "created_at": "2026-04-13T10:00:00",
+    "updated_at": "2026-04-13T10:00:00"
+  },
+  {
+    "id": "model-uuid-2",
+    "name": "claude-3-opus-20240229",
+    "provider": "anthropic",
+    "api_base_url": "https://api.anthropic.com/v1",
+    "description": "Anthropic Claude 3 Opus 模型",
+    "enabled": true,
+    "max_tokens": 4096,
+    "temperature": 0.7,
+    "is_default": false,
+    "created_at": "2026-04-13T11:00:00",
+    "updated_at": "2026-04-13T11:00:00"
+  }
+]
+```
+
+#### 3. `DELETE /api/v1/models/{model_id}`
+
+- 接口描述：删除指定的大模型配置
+- 输入：
+
+| 字段 | 类型 | 位置 | 说明 |
+|------|------|------|------|
+| `model_id` | string | path | 模型配置唯一标识 |
+
+- 输出 `204`：无返回内容
+
+**支持的模型提供商及默认 API 地址：**
+
+| Provider | 默认 API Base URL |
+|----------|-------------------|
+| `openai` | `https://api.openai.com/v1` |
+| `anthropic` | `https://api.anthropic.com/v1` |
+| `google` | `https://generativelanguage.googleapis.com/v1beta` |
+| `ollama` | `http://localhost:11434/v1` |
+| `azure` | `https://{resource}.openai.azure.com` |
+| `deepseek` | `https://api.deepseek.com/v1` |
+| `glm` | `https://open.bigmodel.cn/api/paas/v4` |
+| `minimax` | `https://api.minimax.chat/v1` |
+| `kimi` | `https://api.moonshot.cn/v1` |
+| `custom` | 用户自定义，需通过 `api_base_url` 指定 |
+
+**常见错误码：**
+
+| code | HTTP 状态码 | 说明 |
+|------|-------------|------|
+| `MODEL_NOT_FOUND` | 404 | 模型配置不存在 |
+| `MODEL_DUPLICATE` | 409 | 模型配置已存在 |
+| `MODEL_CREATE_FAILED` | 500 | 模型配置创建失败 |
+| `MODEL_DELETE_FAILED` | 500 | 模型配置删除失败 |
 
 ### 3.7 常见错误码
 

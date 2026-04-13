@@ -169,3 +169,29 @@ class AgentLockORM(Base):
         primary_key=True,
     )
     lock_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
+class ModelORM(Base):
+    __tablename__ = "models"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    api_key: Mapped[str] = mapped_column(Text, nullable=False)
+    api_base_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    max_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=4096)
+    temperature: Mapped[float] = mapped_column(Integer, nullable=False, default=7)
+    is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+        onupdate=utcnow,
+    )
