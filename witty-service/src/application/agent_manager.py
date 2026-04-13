@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Protocol
@@ -350,13 +351,24 @@ class AgentManager:
             content=content,
         )
 
-        for upstream_event in self._adapter_client(agent_id).send_message_stream(session_id, content):
-            yield {
-                "sandbox_type": agent.sandbox_type,
-                "event": upstream_event,
-            }
-            if upstream_event["type"] == "message.completed":
-                break
+        upstream_events = iter(self._adapter_client(agent_id).send_message_stream(session_id, content))
+        stream_end = object()
+
+        try:
+            while True:
+                upstream_event = await asyncio.to_thread(next, upstream_events, stream_end)
+                if upstream_event is stream_end:
+                    break
+                yield {
+                    "sandbox_type": agent.sandbox_type,
+                    "event": upstream_event,
+                }
+                if upstream_event["type"] == "message.completed":
+                    break
+        finally:
+            close = getattr(upstream_events, "close", None)
+            if callable(close):
+                await asyncio.to_thread(close)
 
     def delete_agent(self, agent_id: str) -> None:
         agent = self._get_agent(agent_id)

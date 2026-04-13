@@ -160,13 +160,22 @@ async def send_message_stream(
     services: ServiceContainer = Depends(get_services),
 ) -> StreamingResponse:
     manager = services.get_agent_manager_for_agent(agent_id)
+    event_stream = manager.send_message_stream(
+        agent_id=agent_id,
+        session_id=session_id,
+        content=payload.content,
+    )
+    first_event = await _prefetch_first_event(event_stream)
 
     async def stream() -> AsyncIterator[str]:
-        async for event in manager.send_message_stream(
-            agent_id=agent_id,
-            session_id=session_id,
-            content=payload.content,
-        ):
+        if first_event is None:
+            return
+
+        yield _format_sse_data(first_event)
+        if first_event["event"]["type"] == "message.completed":
+            return
+
+        async for event in event_stream:
             yield _format_sse_data(event)
             if event["event"]["type"] == "message.completed":
                 break
@@ -193,3 +202,12 @@ def _to_agent_response(agent: AgentRecord, default_session_id: str | None) -> Ag
 
 def _format_sse_data(event: dict[str, Any]) -> str:
     return f"data: {json.dumps(event)}\n\n"
+
+
+async def _prefetch_first_event(
+    event_stream: AsyncIterator[dict[str, Any]],
+) -> dict[str, Any] | None:
+    try:
+        return await anext(event_stream)
+    except StopAsyncIteration:
+        return None
