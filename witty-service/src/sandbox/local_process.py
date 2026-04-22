@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import logging
+from math import log
 import socket
 import subprocess
 import sys
 import time
-from io import TextIOBase
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -53,6 +53,7 @@ class LocalProcessSandboxBackend(SandboxBackend):
         workspace_path: str,
         **kwargs: Any,
     ) -> SandboxHandle:
+        """启动本地 witty-agent-server 子进程并返回沙箱句柄。"""
         logger.info(f"[LocalProcessSandbox] Starting sandbox for agent_id: {agent_id}")
         port = int(kwargs.get("port", find_free_port()))
         logger.info(f"[LocalProcessSandbox] Using port: {port}")
@@ -60,17 +61,21 @@ class LocalProcessSandboxBackend(SandboxBackend):
         logger.info(f"[LocalProcessSandbox] Agent server app dir: {app_dir}")
         command = self._build_command(port=port, app_dir=app_dir)
         logger.info(f"[LocalProcessSandbox] Command: {' '.join(command)}")
+        stderr_log_path = self._build_stderr_log_path(workspace_path)
+        stderr_log_path.parent.mkdir(parents=True, exist_ok=True)
+        logger.info(f"[LocalProcessSandbox] Stderr log path: {stderr_log_path}")
 
         try:
             logger.info(f"[LocalProcessSandbox] Starting process in cwd: {command}")
             logger.info(f"[LocalProcessSandbox] Workspace path: {workspace_path}")
-            process = subprocess.Popen(
-                command,
-                cwd=workspace_path,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
+            with stderr_log_path.open("a", encoding="utf-8") as stderr_file:
+                process = subprocess.Popen(
+                    command,
+                    cwd=workspace_path,
+                    stdout=subprocess.DEVNULL,
+                    stderr=stderr_file,
+                    text=True,
+                )
             logger.info(f"[LocalProcessSandbox] Process started with PID: {process.pid} in cwd: {app_dir}")
         except OSError as exc:
             logger.error(f"[LocalProcessSandbox] Failed to start process: {exc}")
@@ -87,7 +92,7 @@ class LocalProcessSandboxBackend(SandboxBackend):
         returncode = process.poll()
         logger.info(f"[LocalProcessSandbox] Initial poll returncode: {returncode}")
         if returncode is not None:
-            stderr = self._read_stderr(process)
+            stderr = self._read_stderr_log(stderr_log_path)
             logger.error(f"[LocalProcessSandbox] Process exited immediately: returncode={returncode}, stderr={stderr}")
             raise sandbox_start_failed(
                 sandbox_type=self.sandbox_type,
@@ -112,6 +117,7 @@ class LocalProcessSandboxBackend(SandboxBackend):
                 "base_url": base_url,
                 "command": command,
                 "agent_server_app_dir": app_dir,
+                "stderr_log_path": str(stderr_log_path),
             },
         )
         self._handles[sandbox_id] = handle
@@ -155,6 +161,7 @@ class LocalProcessSandboxBackend(SandboxBackend):
         self._handles.pop(sandbox_handle.sandbox_id, None)
 
     def _build_command(self, *, port: int, app_dir: str) -> list[str]:
+        """构造 witty-agent-server 的启动命令。"""
         return [
             sys.executable,
             "-m",
@@ -192,6 +199,12 @@ class LocalProcessSandboxBackend(SandboxBackend):
             )
         return str(path)
 
+    @staticmethod
+    def _build_stderr_log_path(workspace_path: str) -> Path:
+        """为本地子进程生成固定的 stderr 日志文件路径。"""
+        logger.info(f"Building stderr log path for workspace: {workspace_path}")
+        return Path(workspace_path).expanduser().resolve(strict=False) / "agent-server.stderr.log"
+
     def _resolve_handle(self, handle: SandboxHandle | str) -> SandboxHandle:
         sandbox_id = handle.sandbox_id if isinstance(handle, SandboxHandle) else handle
         try:
@@ -203,14 +216,8 @@ class LocalProcessSandboxBackend(SandboxBackend):
             ) from exc
 
     @staticmethod
-    def _read_stderr(process: Any) -> str:
-        stderr = getattr(process, "stderr", None)
-        if stderr is None:
+    def _read_stderr_log(stderr_log_path: Path) -> str:
+        """读取启动失败时写入的 stderr 日志，便于错误排查。"""
+        if not stderr_log_path.exists():
             return ""
-        if isinstance(stderr, TextIOBase):
-            return stderr.read()
-        read = getattr(stderr, "read", None)
-        if callable(read):
-            output = read()
-            return output if isinstance(output, str) else str(output)
-        return ""
+        return stderr_log_path.read_text(encoding="utf-8")

@@ -313,11 +313,6 @@ class AgentManager:
                 "agent_delete",
                 lambda: self._repository.delete_agent(agent_id),
             )
-            self._collect_error(
-                cleanup_errors,
-                "workspace_cleanup",
-                lambda: self._workspace_store.cleanup_workspace(agent_id),
-            )
             self._raise_operation_failed(
                 code=AGENT_CREATE_FAILED,
                 message="Agent creation failed.",
