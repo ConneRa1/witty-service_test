@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 
 from openhands.agent_server.models import EventPage, EventSortOrder
 from openhands.app_server.config import depends_event_service
@@ -95,7 +95,8 @@ async def batch_get_events(
     event_service: EventService = event_service_dependency,
 ) -> list[Event | None]:
     """Get a batch of events given their ids, returning null for any missing event."""
+    if len(id) > 100:
+        raise HTTPException(status_code=400, detail='too_many_event_ids')
     event_ids = [UUID(id_) for id_ in id]
-    assert len(id) <= 100
     events = await event_service.batch_get_events(UUID(conversation_id), event_ids)
     return events
