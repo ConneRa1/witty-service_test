@@ -30,8 +30,6 @@ async def search_sandboxes(
     sandbox_service: SandboxService = sandbox_service_dependency,
 ) -> SandboxPage:
     """Search / list sandboxes owned by the current user."""
-    assert limit > 0
-    assert limit <= 100
     return await sandbox_service.search_sandboxes(page_id=page_id, limit=limit)
 
 
@@ -41,7 +39,8 @@ async def batch_get_sandboxes(
     sandbox_service: SandboxService = sandbox_service_dependency,
 ) -> list[SandboxInfo | None]:
     """Get a batch of sandboxes given their ids, returning null for any missing."""
-    assert len(id) < 100
+    if len(id) > 100:
+        raise HTTPException(status_code=400, detail='too_many_sandbox_ids')
     sandboxes = await sandbox_service.batch_get_sandboxes(id)
     return sandboxes
 
