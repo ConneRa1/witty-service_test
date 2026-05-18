@@ -26,8 +26,11 @@ class WebSocketClientPool:
             self._clients[key] = factory(endpoint.base_url)
         return self._clients[key]
 
-    def remove_client(self, agent_id: str) -> None:
-        keys = [key for key in self._clients if key[0] == agent_id]
+    def remove_client(self, agent_id: str, session_id: str | None = None) -> None:
+        if session_id is None:
+            keys = [key for key in self._clients if key[0] == agent_id]
+        else:
+            keys = [(agent_id, session_id)]
         for key in keys:
             self._clients.pop(key, None)
 

@@ -523,7 +523,7 @@ class AgentManager:
                     continue
                 self._logger.info(f"received event: {json.dumps(event_dict, indent=2, ensure_ascii=False)}")
                 events.append(event_dict)
-                if event_dict["type"] == "message.completed":
+                if event_dict["type"] in {"message.completed", "turn.completed"}:
                     has_completed = True
                     self._logger.info("message.completed received, stopping")
                     break
@@ -535,12 +535,17 @@ class AgentManager:
             )
             raise
         finally:
+            await self._close_ws_message_client(
+                agent_id=agent_id,
+                session_id=session_id,
+                ws_client=ws_client,
+            )
             await client_closer()
 
         if not has_completed:
             raise DomainError(
                 code="INVALID_MESSAGE_STREAM",
-                message="Message stream terminated before message.completed.",
+                message="Message stream terminated before completion event.",
                 details={
                     "agent_id": agent_id,
                     "session_id": session_id,
@@ -635,6 +640,12 @@ class AgentManager:
                 status="error",
             )
             raise
+        finally:
+            await self._close_ws_message_client(
+                agent_id=agent_id,
+                session_id=session_id,
+                ws_client=ws_client,
+            )
 
     async def _handle_user_abort(
         self,
@@ -902,6 +913,27 @@ class AgentManager:
         self._logger.info(f"_prepare_ws: message sent")
         return ws_client
 
+    async def _close_ws_message_client(
+        self,
+        *,
+        agent_id: str,
+        session_id: str,
+        ws_client: WebSocketClient,
+    ) -> None:
+        """Close per-turn websocket so unread runtime events cannot leak into later turns."""
+        close = getattr(ws_client, "close", None)
+        if close is not None:
+            try:
+                await close()
+            except Exception as exc:
+                self._logger.warning(
+                    "failed to close ws message client: agent_id=%s session_id=%s error=%s",
+                    agent_id,
+                    session_id,
+                    exc,
+                )
+        self._ws_client_pool.remove_client(agent_id, session_id)
+
     def _sync_session_state_from_event(
         self,
         *,
@@ -931,7 +963,7 @@ class AgentManager:
                 )
             return
 
-        if event_type == "message.completed":
+        if event_type in {"message.completed", "turn.completed"}:
             self._logger.info(
                 "sync session state from ws event: agent_id=%s session_id=%s event_type=%s state=idle",
                 agent_id,
