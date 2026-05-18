@@ -111,21 +111,36 @@ def upgrade() -> None:
     op.create_table(
         "skill_repo",
         sa.Column("repo_id", sa.String(length=36), nullable=False),
-        sa.Column("name", sa.String(length=255), nullable=False),
+        sa.Column("repo_name", sa.String(length=255), nullable=False),
         sa.Column("source_type", sa.String(length=32), nullable=False),
         sa.Column("branch", sa.String(length=255), nullable=True),
         sa.Column("url", sa.Text(), nullable=True),
         sa.Column("local_path", sa.Text(), nullable=True),
-        sa.Column("discover_status", sa.String(length=32), nullable=False, server_default="done"),
+        sa.Column("skill_discover_status", sa.String(length=32), nullable=False, server_default="init"),
         sa.Column("skill_num", sa.Integer(), nullable=False, server_default="0"),
-        sa.Column("discovered_skills", sa.JSON(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("repo_id"),
     )
+    op.create_table(
+        "skills",
+        sa.Column("skill_id", sa.String(length=36), nullable=False),
+        sa.Column("repo_id", sa.String(length=36), nullable=True),
+        sa.Column("skill_name", sa.String(length=255), nullable=False),
+        sa.Column("relative_path", sa.Text(), nullable=True),
+        sa.Column("metadata", sa.JSON(), nullable=False),
+        sa.Column("skill_source", sa.String(length=255), nullable=True),
+        sa.Column("skill_md_url", sa.String(length=255), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.ForeignKeyConstraint(["repo_id"], ["skill_repo.repo_id"], ondelete="CASCADE"),
+        sa.PrimaryKeyConstraint("skill_id"),
+        sa.UniqueConstraint("repo_id", "relative_path", name="uq_skills_repo_relative_path"),
+    )
 
 
 def downgrade() -> None:
+    op.drop_table("skills")
     op.drop_table("skill_repo")
 
     op.drop_index("ix_message_events_session_id", table_name="message_events")

@@ -17,6 +17,7 @@ from witty_service.persistence.orm import (
     ModelORM,
     SessionORM,
     SessionStatus,
+    SkillORM,
     SkillRepositoryORM,
 )
 from witty_service.sandbox.base import SandboxHandle
@@ -94,7 +95,19 @@ class SkillRepositoryRecord:
     local_path: str | None
     skill_discover_status: str
     skill_num: int
-    discovered_skills: list[dict[str, Any]]
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(slots=True)
+class SkillRecord:
+    skill_id: str
+    repo_id: str | None
+    skill_name: str
+    relative_path: str | None
+    metadata: dict[str, Any]
+    skill_source: str | None
+    skill_md_url: str | None
     created_at: datetime
     updated_at: datetime
 
@@ -618,6 +631,7 @@ class SqliteRepository:
         branch: str | None,
         url: str | None,
         local_path: str | None,
+        skill_discover_status: str | None,
     ) -> SkillRepositoryRecord:
         with self._session_factory() as session:
             row = SkillRepositoryORM(
@@ -627,9 +641,8 @@ class SqliteRepository:
                 branch=branch,
                 url=url,
                 local_path=local_path,
-                skill_discover_status='init',
+                skill_discover_status=skill_discover_status,
                 skill_num=0,
-                discovered_skills=[],
             )
             session.add(row)
             session.commit()
@@ -639,40 +652,14 @@ class SqliteRepository:
     def update_skill_repository(
         self,
         repo_id: str,
-        *,
-        source_type: str,
-        branch: str | None,
-        url: str | None,
-        local_path: str | None,
+        **updates: Any,
     ) -> SkillRepositoryRecord:
         with self._session_factory() as session:
             row = session.get(SkillRepositoryORM, repo_id)
             if row is None:
                 raise KeyError(f'Skill repository not found: {repo_id}')
-            row.source_type = source_type
-            row.branch = branch
-            row.url = url
-            row.local_path = local_path
-            row.updated_at = datetime.now(timezone.utc)
-            session.commit()
-            session.refresh(row)
-            return self._to_skill_repository_record(row)
-
-    def update_skill_repository_discovery(
-        self,
-        repo_id: str,
-        *,
-        skill_discover_status: str,
-        skill_num: int,
-        discovered_skills: list[dict[str, Any]],
-    ) -> SkillRepositoryRecord:
-        with self._session_factory() as session:
-            row = session.get(SkillRepositoryORM, repo_id)
-            if row is None:
-                raise KeyError(f'Skill repository not found: {repo_id}')
-            row.skill_discover_status = skill_discover_status
-            row.skill_num = skill_num
-            row.discovered_skills = list(discovered_skills)
+            for key, value in updates.items():
+                setattr(row, key, value)
             row.updated_at = datetime.now(timezone.utc)
             session.commit()
             session.refresh(row)
@@ -686,6 +673,44 @@ class SqliteRepository:
             session.delete(row)
             session.commit()
 
+    def list_skills(self) -> list[SkillRecord]:
+        with self._session_factory() as session:
+            rows = (
+                session.query(SkillORM)
+                .order_by(SkillORM.created_at.asc(), SkillORM.skill_name.asc())
+                .all()
+            )
+            return [self._to_skill_record(row) for row in rows]
+
+    def update_skills(
+        self,
+        repo_id: str,
+        skills: list[SkillRecord],
+    ) -> None:
+        with self._session_factory() as session:
+            repository = session.get(SkillRepositoryORM, repo_id)
+            if repository is None:
+                raise KeyError(f'Skill repository not found: {repo_id}')
+
+            session.query(SkillORM).filter(SkillORM.repo_id == repo_id).delete(
+                synchronize_session=False
+            )
+
+            for item in skills:
+                skill_id = item.skill_id or str(uuid4())
+                row = SkillORM(
+                    skill_id=skill_id,
+                    repo_id=repo_id,
+                    skill_name=item.skill_name or '',
+                    relative_path=item.relative_path,
+                    metadata_json=dict(item.metadata or {}),
+                    skill_source=item.skill_source,
+                    skill_md_url=item.skill_md_url,
+                )
+                session.add(row)
+
+            session.commit()
+
     @staticmethod
     def _to_skill_repository_record(row: SkillRepositoryORM) -> SkillRepositoryRecord:
         return SkillRepositoryRecord(
@@ -697,7 +722,20 @@ class SqliteRepository:
             local_path=row.local_path,
             skill_discover_status=row.skill_discover_status,
             skill_num=row.skill_num,
-            discovered_skills=list(row.discovered_skills or []),
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+        )
+
+    @staticmethod
+    def _to_skill_record(row: SkillORM) -> SkillRecord:
+        return SkillRecord(
+            skill_id=row.skill_id,
+            repo_id=row.repo_id,
+            skill_name=row.skill_name,
+            relative_path=row.relative_path,
+            metadata=dict(row.metadata_json or {}),
+            skill_source=row.skill_source,
+            skill_md_url=row.skill_md_url,
             created_at=row.created_at,
             updated_at=row.updated_at,
         )

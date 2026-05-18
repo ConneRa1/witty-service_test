@@ -4,8 +4,17 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, Enum as SQLEnum, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
-from sqlalchemy import Enum as SQLEnum
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Enum as SQLEnum,
+    ForeignKey,
+    Integer,
+    JSON,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -210,14 +219,45 @@ class SkillRepositoryORM(Base):
     url: Mapped[str | None] = mapped_column(Text, nullable=True)
     local_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     skill_discover_status: Mapped[str] = mapped_column(
-        String(32), nullable=False, default='done'
+        String(32), nullable=False, default='init'
     )
     skill_num: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    discovered_skills: Mapped[list[dict[str, Any]]] = mapped_column(
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+        onupdate=utcnow,
+    )
+
+
+class SkillORM(Base):
+    __tablename__ = 'skills'
+    __table_args__ = (
+        UniqueConstraint('repo_id', 'relative_path', name='uq_skills_repo_relative_path'),
+    )
+
+    skill_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    repo_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey('skill_repo.repo_id', ondelete='CASCADE'),
+        nullable=True,
+        index=True,
+    )
+    skill_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    relative_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(
+        'metadata',
         JSON,
         nullable=False,
-        default=list,
+        default=dict,
     )
+    skill_source: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    skill_md_url: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

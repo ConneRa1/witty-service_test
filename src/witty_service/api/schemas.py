@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime
-from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -111,13 +110,8 @@ class SessionEventsResponse(BaseModel):
     pagination: PaginationInfo
 
 
-class SkillRepositorySourceType(str, Enum):
-    GIT = 'git'
-    LOCAL_IMPORT = 'local_import'
-
-
 class SkillRepositoryRequest(BaseModel):
-    source_type: SkillRepositorySourceType | None = None
+    source_type: str | None = None
     branch: str | None = None
     url: str | None = None
     local_path: str | None = None
@@ -128,12 +122,21 @@ class SkillRepositoryResponse(BaseModel):
 
     repo_id: str
     repo_name: str = Field(min_length=1, max_length=255)
-    source_type: SkillRepositorySourceType
+    source_type: str
     branch: str | None = None
     url: str | None = None
     local_path: str | None = None
     skill_discover_status: str
     skill_num: int
-    discovered_skills: list[dict[str, Any]] = Field(default_factory=list)
-    created_at: datetime
-    updated_at: datetime
+
+
+class SkillResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    skill_id: str
+    repo_id: str
+    skill_name: str
+    relative_path: str | None
+    metadata: dict[str, Any]
+    skill_source: str | None
+    skill_md_url: str | None

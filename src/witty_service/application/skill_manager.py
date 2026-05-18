@@ -6,38 +6,31 @@ import re
 import shutil
 import subprocess
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from urllib.parse import urlparse
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid5
 from zipfile import ZipFile
 
-from witty_service.api.schemas import SkillRepositoryRequest, SkillRepositorySourceType
-from witty_service.persistence.repositories import SkillRepositoryRecord, SqliteRepository
+from witty_service.api.schemas import SkillRepositoryRequest
+from witty_service.persistence.repositories import SkillRepositoryRecord, SkillRecord, SqliteRepository
 
 _logger = logging.getLogger(__name__)
 GIT_CLONE_RETRY_TIMES = 3
 LOCAL_ARCHIVE_BASE_DIR = Path('/tmp/witty-service-skill-repo-archives')
 
 
-@dataclass(slots=True, frozen=True)
-class SkillMinRepository:
-    repo_id: str
-    name: str
-    source_type: SkillRepositorySourceType
-    branch: str | None = None
-    url: str | None = None
-    local_path: str | None = None
+class SkillRepositorySourceType:
+    GIT = 'git'
+    LOCAL = 'local'
 
 
-@dataclass(slots=True, frozen=True)
-class SkillObject:
-    skill_id: str
-    skill_name: str
-    relative_path: str | None = None
-    metadata: dict[str, object] | None = None
-    source_repo: SkillMinRepository | None = None
-    skill_md_url: str | None = None
+class SkillDiscoverStatus:
+    INIT = 'init'
+    DISCOVERING = 'discovering'
+    DONE = 'done'
+    FAILED = 'failed'
 
 
 @dataclass(slots=True)
@@ -63,6 +56,7 @@ class SkillManager:
             branch=normalized.branch,
             url=normalized.url,
             local_path=normalized.local_path,
+            skill_discover_status=SkillDiscoverStatus.INIT,
         )
 
     def update_skill_repository(
@@ -91,7 +85,7 @@ class SkillManager:
         )
         return self.repository.update_skill_repository(
             repo_id,
-            source_type=source_type.value,
+            source_type=source_type,
             branch=branch or None,
             url=url or None,
             local_path=local_path or None,
@@ -103,18 +97,15 @@ class SkillManager:
     def discover_skill_repositories(self) -> list[SkillRepositoryRecord]:
         updated_repositories: list[SkillRepositoryRecord] = []
         for repository in self.repository.list_skill_repositories():
-            self._set_discovery_status(repository, 'discovering')
+            self._set_discovery_status(repository, SkillDiscoverStatus.DISCOVERING)
             try:
-                repository_skills = self._discover_skill_repository_skills(repository)
+                skill_list = self._discover_skill_repository_skills(repository)
+                self.repository.update_skills(repository.repo_id, skills=skill_list)
                 updated_repositories.append(
-                    self.repository.update_skill_repository_discovery(
+                    self.repository.update_skill_repository(
                         repository.repo_id,
-                        skill_discover_status='done',
-                        skill_num=len(repository_skills),
-                        discovered_skills=[
-                            self._discovery_item_to_payload(item)
-                            for item in repository_skills
-                        ],
+                        skill_discover_status=SkillDiscoverStatus.DONE,
+                        skill_num=len(skill_list),
                     )
                 )
             except Exception as exc:
@@ -124,43 +115,41 @@ class SkillManager:
                     repository.repo_name,
                     exc,
                 )
+                self.repository.update_skills(repository.repo_id, skills=[])
                 updated_repositories.append(
-                    self.repository.update_skill_repository_discovery(
+                    self.repository.update_skill_repository(
                         repository.repo_id,
-                        skill_discover_status='failed',
+                        skill_discover_status=SkillDiscoverStatus.FAILED,
                         skill_num=0,
-                        discovered_skills=[],
                     )
                 )
         return updated_repositories
 
     def discover_one_skill_repository(self, repo_id: str) -> SkillRepositoryRecord:
         repository = self._get_owned_repo(repo_id)
-        if repository.skill_discover_status == 'discovering':
+        if repository.skill_discover_status == SkillDiscoverStatus.DISCOVERING:
             raise ValueError('Skill repository discovery is already in progress')
 
-        self._set_discovery_status(repository, 'discovering')
+        self._set_discovery_status(repository, SkillDiscoverStatus.DISCOVERING)
         try:
-            items = self._discover_skill_repository_skills(repository)
-            return self.repository.update_skill_repository_discovery(
+            skill_list = self._discover_skill_repository_skills(repository)
+            self.repository.update_skills(repository.repo_id, skills=skill_list)
+            return self.repository.update_skill_repository(
                 repository.repo_id,
-                skill_discover_status='done',
-                skill_num=len(items),
-                discovered_skills=[
-                    self._discovery_item_to_payload(item) for item in items
-                ],
+                skill_discover_status=SkillDiscoverStatus.DONE,
+                skill_num=len(skill_list),
             )
         except Exception:
-            self.repository.update_skill_repository_discovery(
+            self.repository.update_skills(repository.repo_id, skills=[])
+            self.repository.update_skill_repository(
                 repository.repo_id,
-                skill_discover_status='failed',
+                skill_discover_status=SkillDiscoverStatus.FAILED,
                 skill_num=0,
-                discovered_skills=[],
             )
             raise
 
-    def get_repository(self, repo_id: str) -> SkillRepositoryRecord:
-        return self._get_owned_repo(repo_id)
+    def list_skills(self) -> list[SkillRecord]:
+        return self.repository.list_skills()
 
     @classmethod
     def discover_skill_repository_in_background(
@@ -184,11 +173,10 @@ class SkillManager:
         return repository
 
     def _set_discovery_status(self, repo: SkillRepositoryRecord, status: str) -> None:
-        self.repository.update_skill_repository_discovery(
+        self.repository.update_skill_repository(
             repo.repo_id,
             skill_discover_status=status,
             skill_num=repo.skill_num,
-            discovered_skills=repo.discovered_skills,
         )
 
     def _normalize_create_request(
@@ -252,7 +240,7 @@ class SkillManager:
 
         local_path_str = request.local_path
         if not local_path_str:
-            raise ValueError('local_import skill repositories require local_path')
+            raise ValueError('local skill repositories require local_path')
         local_path = Path(local_path_str).expanduser()
         if local_path.is_file() and local_path.suffix == '.zip':
             repository_name = local_path.stem or 'local-repository-zip'
@@ -263,7 +251,7 @@ class SkillManager:
     def _validate_source_fields(
         self,
         *,
-        source_type: SkillRepositorySourceType,
+        source_type: str,
         url: str | None,
         local_path: str | None,
     ) -> None:
@@ -271,22 +259,22 @@ class SkillManager:
             if not url:
                 raise ValueError('git skill repositories require url')
             return
-        if source_type == SkillRepositorySourceType.LOCAL_IMPORT:
+        if source_type == SkillRepositorySourceType.LOCAL:
             if not local_path:
-                raise ValueError('local_import skill repositories require local_path')
+                raise ValueError('local skill repositories require local_path')
             return
         raise ValueError(f'Unsupported skill repository source type: {source_type}')
 
     def _discover_skill_repository_skills(
         self, repo: SkillRepositoryRecord
-    ) -> list[SkillObject]:
-        if repo.source_type == SkillRepositorySourceType.LOCAL_IMPORT:
+    ) -> list[SkillRecord]:
+        if repo.source_type == SkillRepositorySourceType.LOCAL:
             return self._discover_local_skill_repository_skills(repo)
         return self._discover_git_skill_repository_skills(repo)
 
     def _discover_git_skill_repository_skills(
         self, repo: SkillRepositoryRecord
-    ) -> list[SkillObject]:
+    ) -> list[SkillRecord]:
         clone_url = self._normalize_clone_url_for_git(repo.url)
         with TemporaryDirectory() as temp_dir:
             clone_dir = Path(temp_dir) / 'repo'
@@ -305,24 +293,16 @@ class SkillManager:
                 assert last_exc is not None
                 raise last_exc
 
-            branch = repo.branch or self._get_cloned_repo_branch(clone_dir)
-            resolved_repo = repo
-            if branch and branch != repo.branch:
-                resolved_repo = SkillRepositoryRecord(
-                    repo_id=repo.repo_id,
-                    repo_name=repo.repo_name,
-                    source_type=repo.source_type,
-                    branch=branch,
-                    url=repo.url,
-                    local_path=repo.local_path,
-                    skill_discover_status=repo.skill_discover_status,
-                    skill_num=repo.skill_num,
-                    discovered_skills=repo.discovered_skills,
-                    created_at=repo.created_at,
-                    updated_at=repo.updated_at,
-                )
+            if repo.branch is None:
+                # Persist default branch resolved from cloned repository.
+                detected_branch = self._get_cloned_repo_branch(clone_dir)
+                if detected_branch:
+                    repo = self.repository.update_skill_repository(
+                        repo.repo_id,
+                        branch=detected_branch,
+                    )
             return self._scan_skill_repository_root(
-                repo=resolved_repo,
+                repo=repo,
                 repo_root=clone_dir,
                 only_root=False,
             )
@@ -351,7 +331,7 @@ class SkillManager:
 
     def _discover_local_skill_repository_skills(
         self, repo: SkillRepositoryRecord
-    ) -> list[SkillObject]:
+    ) -> list[SkillRecord]:
         local_path = Path(str(repo.local_path)).expanduser().resolve(strict=False)
         if local_path.is_file() and local_path.suffix == '.zip':
             extract_dir = self._prepare_archive_extract_dir(repo)
@@ -387,7 +367,7 @@ class SkillManager:
 
     def _scan_local_skill_repository_root(
         self, repo: SkillRepositoryRecord, repo_root: Path
-    ) -> list[SkillObject]:
+    ) -> list[SkillRecord]:
         root_skill = repo_root / 'SKILL.md'
         if root_skill.exists():
             return self._scan_skill_repository_root(
@@ -406,7 +386,7 @@ class SkillManager:
         repo: SkillRepositoryRecord,
         repo_root: Path,
         only_root: bool,
-    ) -> list[SkillObject]:
+    ) -> list[SkillRecord]:
         if not repo_root.exists():
             raise ValueError(
                 f'Repository root does not exist for repo_id {repo.repo_id}: {repo_root}'
@@ -421,24 +401,31 @@ class SkillManager:
                 if path.is_file() and path.name == 'SKILL.md'
             )
 
-        source_repo = self._build_source_repository(repo)
-        discovered: list[SkillObject] = []
+        discovered: list[SkillRecord] = []
         for skill_file in skill_files:
-            metadata, _content = self._load_skill_frontmatter(skill_file)
+            metadata, _ = self._load_skill_frontmatter(skill_file)
             relative_path = self._to_repository_relative_path(repo_root, skill_file)
+            skill_source = repo.local_path if repo.source_type == SkillRepositorySourceType.LOCAL else repo.url
+            skill_md_url = self._build_skill_md_url(repo, relative_path)
+            skill_id=self._build_deterministic_skill_id(repo.repo_id, relative_path)
             discovered.append(
-                SkillObject(
-                    skill_id=str(uuid4()),
+                SkillRecord(
+                    skill_id=skill_id,
+                    repo_id=repo.repo_id,
                     skill_name=self._derive_repository_skill_name(skill_file, metadata),
                     relative_path=relative_path,
                     metadata=metadata,
-                    source_repo=source_repo,
-                    skill_md_url=self._build_skill_md_url(
-                        repo, relative_path, repo_root
-                    ),
+                    skill_source=skill_source,
+                    skill_md_url=skill_md_url,
+                    created_at=datetime.now(timezone.utc),
+                    updated_at=datetime.now(timezone.utc),
                 )
             )
         return discovered
+
+    def _build_deterministic_skill_id(self, repo_id: str, relative_path: str) -> str:
+        unique_key = f'{repo_id}:{relative_path}'
+        return str(uuid5(NAMESPACE_URL, unique_key))
 
     def _load_skill_frontmatter(
         self, skill_file: Path
@@ -518,26 +505,13 @@ class SkillManager:
     def _to_repository_relative_path(self, repo_root: Path, skill_file: Path) -> str:
         return skill_file.relative_to(repo_root).as_posix()
 
-    def _build_source_repository(
-        self, repo: SkillRepositoryRecord
-    ) -> SkillMinRepository:
-        return SkillMinRepository(
-            repo_id=repo.repo_id,
-            name=repo.repo_name,
-            source_type=repo.source_type,
-            branch=repo.branch,
-            url=repo.url,
-            local_path=repo.local_path,
-        )
-
     def _build_skill_md_url(
         self,
         repo: SkillRepositoryRecord,
         relative_path: str,
-        repo_root: Path,
     ) -> str | None:
-        if repo.source_type == SkillRepositorySourceType.LOCAL_IMPORT:
-            return str((repo_root / relative_path).resolve(strict=False))
+        if repo.source_type == SkillRepositorySourceType.LOCAL:
+            return relative_path
 
         if not repo.url:
             return None
@@ -570,22 +544,3 @@ class SkillManager:
         if not path:
             return None
         return f'{parsed.scheme}://{parsed.netloc}/{path}'
-
-    def _discovery_item_to_payload(self, item: SkillObject) -> dict[str, object]:
-        payload: dict[str, object] = {
-            'skill_id': item.skill_id,
-            'skill_name': item.skill_name,
-            'relative_path': item.relative_path,
-            'metadata': item.metadata or {},
-            'skill_md_url': item.skill_md_url,
-        }
-        if item.source_repo is not None:
-            payload['source_repo'] = {
-                'repo_id': item.source_repo.repo_id,
-                'name': item.source_repo.name,
-                'source_type': item.source_repo.source_type,
-                'branch': item.source_repo.branch,
-                'url': item.source_repo.url,
-                'local_path': item.source_repo.local_path,
-            }
-        return payload

@@ -11,7 +11,7 @@ from fastapi import (
 )
 
 from witty_service.api.auth import require_bearer_auth
-from witty_service.api.schemas import SkillRepositoryRequest, SkillRepositoryResponse
+from witty_service.api.schemas import SkillRepositoryRequest, SkillRepositoryResponse, SkillResponse
 from witty_service.api.services import ServiceContainer
 from witty_service.application.skill_manager import SkillManager
 from witty_service.persistence.repositories import SkillRepositoryRecord
@@ -122,17 +122,13 @@ def discover_one_skill_repository(
     return _to_skill_repository_response(repository)
 
 
-@router.get('/repos/{repo_id}', response_model=SkillRepositoryResponse)
-def get_repository(
-    repo_id: str,
+@router.get('/skills', response_model=list[SkillResponse])
+def list_skills(
     services: ServiceContainer = Depends(get_services),
-) -> SkillRepositoryResponse:
+) -> list[SkillResponse]:
     service = _build_service(services)
-    try:
-        repository = service.get_repository(repo_id)
-    except KeyError as exc:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    return _to_skill_repository_response(repository)
+    skills = service.list_skills()
+    return [SkillResponse.model_validate(item) for item in skills]
 
 
 def _to_skill_repository_response(
