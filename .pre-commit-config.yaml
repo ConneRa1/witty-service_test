@@ -1,0 +1,10 @@
+repos:
+- repo: local
+  hooks:
+  - id: uv-build-check
+    name: uv build check
+    entry: uv build
+    language: system
+    pass_filenames: false
+    always_run: true
+    verbose: true
