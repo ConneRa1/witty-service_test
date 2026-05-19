@@ -461,7 +461,23 @@ class SqliteRepository:
             row = session.get(AgentORM, agent_id)
             if row is None:
                 return
+            builtin_skill_ids = [
+                skill_id
+                for (skill_id,) in (
+                    session.query(AgentSkillORM.skill_id)
+                    .filter(
+                        AgentSkillORM.agent_id == agent_id,
+                        AgentSkillORM.source_type == 'builtin',
+                    )
+                    .all()
+                )
+            ]
             session.delete(row)
+            session.flush()
+            for skill_id in builtin_skill_ids:
+                skill_row = session.get(SkillORM, skill_id)
+                if skill_row is not None:
+                    session.delete(skill_row)
             session.commit()
 
     @staticmethod

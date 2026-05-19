@@ -929,6 +929,8 @@ class AgentManager:
         try:
             self._repository.update_agent_status(agent_id, AgentStatus.deleted)
             logger.info(f"[AgentManager] Agent status updated to deleted in database")
+            # 彻底删除 agent 记录（包括关联的 session、message、skill 等），放在最后执行，确保前面步骤都完成了才删除记录
+            self._repository.delete_agent(agent_id)
         except Exception as exc:
             agent_delete_error = exc
             cleanup_errors.append({"stage": "agent_status", "error": self._error_message(exc)})
