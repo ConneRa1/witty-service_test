@@ -56,7 +56,7 @@ def test_send_message_stream_returns_sse_events(monkeypatch):
 
     with client.stream(
         "POST",
-        "/api/v1/agents/agent-1/sessions/session-1/messages/stream",
+        "/agents/agent-1/sessions/session-1/messages/stream",
         headers={"Authorization": "Bearer test-token"},
         json={"content": "hello"},
     ) as resp:
@@ -115,7 +115,7 @@ def test_send_message_stream_returns_standard_error_before_first_event(monkeypat
     client = TestClient(create_app(services=services))
 
     resp = client.post(
-        "/api/v1/agents/agent-1/sessions/session-1/messages/stream",
+        "/agents/agent-1/sessions/session-1/messages/stream",
         headers={"Authorization": "Bearer test-token"},
         json={"content": "hello"},
     )
@@ -138,7 +138,7 @@ def test_send_message_stream_reuses_send_message_request_validation(monkeypatch)
     client = TestClient(create_app(services=services))
 
     resp = client.post(
-        "/api/v1/agents/agent-1/sessions/session-1/messages/stream",
+        "/agents/agent-1/sessions/session-1/messages/stream",
         headers={"Authorization": "Bearer test-token"},
         json={"content": ""},
     )

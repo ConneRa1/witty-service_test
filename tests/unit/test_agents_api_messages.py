@@ -33,7 +33,7 @@ def test_send_message_returns_sandbox_type_and_events(monkeypatch):
     client = TestClient(create_app(services=services))
 
     resp = client.post(
-        "/api/v1/agents/agent-1/sessions/session-1/messages",
+        "/agents/agent-1/sessions/session-1/messages",
         headers={"Authorization": "Bearer test-token"},
         json={"content": "hello"},
     )

@@ -8,7 +8,7 @@ from witty_service.api.services import ServiceContainer
 from witty_service.domain.errors import DomainError
 from witty_service.persistence.repositories import ModelRecord
 
-router = APIRouter(prefix="/api/v1/models", tags=["models"], dependencies=[Depends(require_bearer_auth)])
+router = APIRouter(prefix="/models", tags=["models"], dependencies=[Depends(require_bearer_auth)])
 
 MODEL_NOT_FOUND = "MODEL_NOT_FOUND"
 

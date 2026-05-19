@@ -291,7 +291,7 @@ def test_message_stream_endpoint_ends_after_completed(monkeypatch):
 
     with client.stream(
         "POST",
-        f"/api/v1/agents/{agent.id}/sessions/{session.id}/messages/stream",
+        f"/agents/{agent.id}/sessions/{session.id}/messages/stream",
         headers={"Authorization": "Bearer test-token"},
         json={"content": "hello"},
     ) as resp:

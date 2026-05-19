@@ -17,7 +17,7 @@ from witty_service.application.skill_manager import SkillManager
 from witty_service.persistence.repositories import SkillRepositoryRecord
 
 router = APIRouter(
-    prefix='/api/v1/skills',
+    prefix='/skills',
     tags=['skills'],
     dependencies=[Depends(require_bearer_auth)],
 )

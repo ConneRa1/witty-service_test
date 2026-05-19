@@ -17,7 +17,7 @@ async def test_pause_resume_flow():
     # 1. Create agent
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post(
-            "/api/v1/agents",
+            "/agents",
             json={
                 "name": "test-agent",
                 "sandbox_type": "local_process",
@@ -32,7 +32,7 @@ async def test_pause_resume_flow():
     # 2. Pause
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post(
-            f"/api/v1/agents/{agent_id}/pause",
+            f"/agents/{agent_id}/pause",
             headers=AUTH_HEADERS,
         )
         assert response.status_code == 200
@@ -41,7 +41,7 @@ async def test_pause_resume_flow():
     # 3. Resume
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post(
-            f"/api/v1/agents/{agent_id}/resume",
+            f"/agents/{agent_id}/resume",
             headers=AUTH_HEADERS,
         )
         assert response.status_code == 200
@@ -50,7 +50,7 @@ async def test_pause_resume_flow():
     # Cleanup
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         await client.delete(
-            f"/api/v1/agents/{agent_id}",
+            f"/agents/{agent_id}",
             headers=AUTH_HEADERS,
         )
 
@@ -63,7 +63,7 @@ async def test_delete_resume_flow():
     # 1. Create agent
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post(
-            "/api/v1/agents",
+            "/agents",
             json={
                 "name": "test-agent",
                 "sandbox_type": "local_process",
@@ -78,7 +78,7 @@ async def test_delete_resume_flow():
     # 2. Delete
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.delete(
-            f"/api/v1/agents/{agent_id}",
+            f"/agents/{agent_id}",
             headers=AUTH_HEADERS,
         )
         assert response.status_code == 204
@@ -86,7 +86,7 @@ async def test_delete_resume_flow():
     # 3. Resume from deleted - should recreate agent and return running status
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post(
-            f"/api/v1/agents/{agent_id}/resume",
+            f"/agents/{agent_id}/resume",
             headers=AUTH_HEADERS,
         )
         assert response.status_code == 200

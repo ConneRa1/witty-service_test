@@ -14,7 +14,7 @@ from witty_service.api.cve_schemas import (
 from witty_service.api.services import ServiceContainer
 from witty_service.application.cve_service import CveService
 
-router = APIRouter(prefix="/api/v1/cve", tags=["cve"], dependencies=[Depends(require_bearer_auth)])
+router = APIRouter(prefix="/cve", tags=["cve"], dependencies=[Depends(require_bearer_auth)])
 
 
 def get_services(request: Request) -> ServiceContainer:

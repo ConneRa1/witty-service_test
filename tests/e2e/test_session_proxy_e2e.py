@@ -17,7 +17,7 @@ async def test_session_proxy_flow():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         # 1. Create agent
         response = await client.post(
-            "/api/v1/agents",
+            "/agents",
             json={
                 "name": "test-agent",
                 "sandbox_type": "local_process",
@@ -32,7 +32,7 @@ async def test_session_proxy_flow():
     # 2. Create session (should proxy to witty-agent-server)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post(
-            f"/api/v1/agents/{agent_id}/sessions",
+            f"/agents/{agent_id}/sessions",
             headers=AUTH_HEADERS,
         )
         assert response.status_code == 201
@@ -42,7 +42,7 @@ async def test_session_proxy_flow():
     # 3. List sessions (should refresh local cache)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get(
-            f"/api/v1/agents/{agent_id}/sessions",
+            f"/agents/{agent_id}/sessions",
             headers=AUTH_HEADERS,
         )
         assert response.status_code == 200
@@ -51,7 +51,7 @@ async def test_session_proxy_flow():
     # 4. Delete session
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.delete(
-            f"/api/v1/agents/{agent_id}/sessions/{session_id}",
+            f"/agents/{agent_id}/sessions/{session_id}",
             headers=AUTH_HEADERS,
         )
         assert response.status_code == 204
@@ -59,7 +59,7 @@ async def test_session_proxy_flow():
     # 5. Cleanup - delete agent
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.delete(
-            f"/api/v1/agents/{agent_id}",
+            f"/agents/{agent_id}",
             headers=AUTH_HEADERS,
         )
         assert response.status_code == 204
