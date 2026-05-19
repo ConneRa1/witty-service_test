@@ -14,6 +14,10 @@ from uuid import NAMESPACE_URL, uuid5
 from zipfile import ZipFile
 
 from witty_service.api.schemas import SkillRepositoryRequest, SkillSourceType
+from witty_service.application.awesome_openclaw_sync import (
+    is_awesome_openclaw_repository,
+    sync_awesome_openclaw_skills,
+)
 from witty_service.persistence.repositories import SkillRepositoryRecord, SkillRecord, SqliteRepository
 
 _logger = logging.getLogger(__name__)
@@ -98,6 +102,29 @@ class SkillManager:
     def discover_skill_repositories(self) -> list[SkillRepositoryRecord]:
         updated_repositories: list[SkillRepositoryRecord] = []
         for repository in self.repository.list_skill_repositories():
+            if is_awesome_openclaw_repository(repository):
+                try:
+                    updated_repositories.append(
+                        sync_awesome_openclaw_skills(
+                            repository=self.repository,
+                            repo_id=repository.repo_id,
+                        )
+                    )
+                except Exception as exc:
+                    _logger.warning(
+                        "Failed to discover awesome-openclaw-skills repository %s: %s",
+                        repository.repo_id,
+                        exc,
+                    )
+                    self.repository.update_skills(repository.repo_id, skills=[])
+                    updated_repositories.append(
+                        self.repository.update_skill_repository(
+                            repository.repo_id,
+                            skill_discover_status=SkillDiscoverStatus.FAILED,
+                            skill_num=0,
+                        )
+                    )
+                continue
             self._set_discovery_status(repository, SkillDiscoverStatus.DISCOVERING)
             try:
                 skill_list = self._discover_skill_repository_skills(repository)
@@ -130,6 +157,21 @@ class SkillManager:
         repository = self.get_repository_by_repo_id(repo_id)
         if repository.skill_discover_status == SkillDiscoverStatus.DISCOVERING:
             raise ValueError('Skill repository discovery is already in progress')
+
+        if is_awesome_openclaw_repository(repository):
+            try:
+                return sync_awesome_openclaw_skills(
+                    repository=self.repository,
+                    repo_id=repository.repo_id,
+                )
+            except Exception:
+                self.repository.update_skills(repository.repo_id, skills=[])
+                self.repository.update_skill_repository(
+                    repository.repo_id,
+                    skill_discover_status=SkillDiscoverStatus.FAILED,
+                    skill_num=0,
+                )
+                raise
 
         self._set_discovery_status(repository, SkillDiscoverStatus.DISCOVERING)
         try:
@@ -166,6 +208,17 @@ class SkillManager:
             _logger.warning(
                 'Background discover failed for repository %s: %s', repo_id, exc
             )
+
+    @classmethod
+    def sync_awesome_repository_in_background(
+        cls,
+        *,
+        repository: SqliteRepository,
+    ) -> None:
+        try:
+            sync_awesome_openclaw_skills(repository=repository, repo_id=None)
+        except Exception as exc:
+            _logger.warning("Background awesome-openclaw-skills sync failed: %s", exc)
 
     def _set_discovery_status(self, repo: SkillRepositoryRecord, status: str) -> None:
         self.repository.update_skill_repository(

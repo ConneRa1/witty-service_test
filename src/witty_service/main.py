@@ -1,4 +1,5 @@
 import logging
+import threading
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,6 +10,7 @@ from witty_service.api.errors import register_exception_handlers
 from witty_service.api.models import router as models_router
 from witty_service.api.services import ServiceContainer, build_default_services
 from witty_service.api.skills import router as skills_router
+from witty_service.application.skill_manager import SkillManager
 from witty_service.config import get_settings
 from witty_agent_server.api.routers.agent_router import create_agent_router
 from witty_agent_server.api.routers.session_router import (
@@ -65,6 +67,14 @@ def create_app(*, services: ServiceContainer | None = None) -> FastAPI:
     @app.get("/server/capabilities")
     def capabilities() -> dict[str, list[str]]:
         return {"supported_runtimes": ["openclaw"]}
+
+    @app.on_event("startup")
+    def sync_awesome_openclaw_skills_on_startup() -> None:
+        threading.Thread(
+            target=SkillManager.sync_awesome_repository_in_background,
+            kwargs={"repository": app.state.services.repository},
+            daemon=True,
+        ).start()
 
     app.include_router(agents_router)
     app.include_router(cve_router)
