@@ -21,6 +21,8 @@ DEFAULT_GATEWAY_WS_URL = "ws://127.0.0.1:18789"
 _DEFAULT_CONNECT_TIMEOUT = 10.0
 _DEFAULT_EVENT_TIMEOUT = 30.0
 _DEFAULT_IDLE_TIMEOUT = 30.0
+_DEFAULT_MIN_PROTOCOL = 3
+_DEFAULT_MAX_PROTOCOL = 4
 _DEFAULT_SCOPES = [
     "operator.admin",
     "operator.read",
@@ -283,8 +285,9 @@ class OpenClawGatewayClient(ClientBase):
         role = "operator"
         scopes = list(_DEFAULT_SCOPES)
         params: dict[str, Any] = {
-            "minProtocol": 3,
-            "maxProtocol": 3,
+            # Keep v3 compatibility while supporting v4 gateways.
+            "minProtocol": _DEFAULT_MIN_PROTOCOL,
+            "maxProtocol": _DEFAULT_MAX_PROTOCOL,
             "client": {
                 "id": "cli",
                 "version": "2026.4.2",
