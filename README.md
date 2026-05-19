@@ -30,7 +30,7 @@ uv pip install -e ".[dev]"
 ### 1.3 启动开发服务器
 
 ```bash
-uv run uvicorn src.main:create_app --factory --host 0.0.0.0 --port 8000
+uv run uvicorn witty_service.main:create_app --factory --host 0.0.0.0 --port 8000 --reload
 ```
 
 建议准备：

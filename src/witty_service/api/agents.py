@@ -268,10 +268,10 @@ async def send_message_stream(
                 return
 
             async for event in event_stream:
-                yield _format_sse_data(event)
-                if event["event"]["type"] in {"message.completed", "turn.completed"}:
-                    return
-                        
+ 	            yield _format_sse_data(event)
+ 	            if event["event"]["type"] in {"message.completed", "turn.completed"}:
+ 	                return
+
         except (GeneratorExit, asyncio.CancelledError): 
             if hasattr(event_stream, "aclose"): 
                 await event_stream.aclose() 
