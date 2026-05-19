@@ -4,6 +4,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 from witty_agent_server.application.models.errors import ErrorResponse
 from witty_agent_server.application.services.agent import (
     AgentService,
@@ -22,6 +23,14 @@ from witty_agent_server.application.services.skill.opencode_skill_service import
 
 
 logger = logging.getLogger(__name__)
+
+
+class InstallSkillRequest(BaseModel):
+    skill_name: str = Field(min_length=1)
+
+
+class UninstallSkillRequest(BaseModel):
+    skill_name: str = Field(min_length=1)
 
 
 def create_agent_router(
@@ -115,6 +124,125 @@ def create_agent_router(
                 exc.code,
             )
             return _map_agent_skill_error(request=request, exc=exc)
+
+    @router.post("/skills/install", response_model=None)
+    def install_agent_skill(
+        payload: InstallSkillRequest,
+        request: Request,
+        id: str | None = None,
+    ) -> dict[str, Any] | JSONResponse:
+        try:
+            resolved_agent_id = _resolve_request_agent_id(
+                agent_service=agent_service,
+                agent_id=id,
+            )
+            agent = agent_service.status(agent_id=resolved_agent_id)
+        except AgentServiceError as exc:
+            return _map_agent_error(request=request, exc=exc)
+        logger.info(
+            "install_agent_skill called, agent_id=%s runtime_type=%s skill_name=%s",
+            agent.id,
+            agent.runtime_type,
+            payload.skill_name,
+        )
+        try:
+            resolved_skill_service = _resolve_skill_service(
+                runtime_type=agent.runtime_type,
+                openclaw_skill_service=resolved_openclaw_skill_service,
+                opencode_skill_service=resolved_opencode_skill_service,
+            )
+            install_result = resolved_skill_service.install_skill(
+                agent_id=agent.id,
+                skill_name=payload.skill_name,
+            )
+
+            return {
+                "agent_id": agent.id,
+                "runtime_type": agent.runtime_type,
+                **install_result,
+            }
+        except AgentSkillServiceError as exc:
+            logger.warning(
+                "install_agent_skill failed, runtime_type=%s message=%s",
+                agent.runtime_type,
+                exc.message,
+            )
+            return _map_agent_skill_error(request=request, exc=exc)
+        except Exception as exc:
+            logger.exception(
+                "install_agent_skill unexpected error, agent_id=%s runtime_type=%s",
+                agent.id,
+                agent.runtime_type,
+            )
+            return _error_response(
+                request=request,
+                status_code=500,
+                code="INTERNAL_SERVER_ERROR",
+                message="internal server error",
+                details={
+                    "runtime_type": agent.runtime_type,
+                    "reason": str(exc),
+                },
+            )
+
+    @router.post("/skills/uninstall", response_model=None)
+    def uninstall_agent_skill(
+        payload: UninstallSkillRequest,
+        request: Request,
+        id: str | None = None,
+    ) -> dict[str, Any] | JSONResponse:
+        try:
+            resolved_agent_id = _resolve_request_agent_id(
+                agent_service=agent_service,
+                agent_id=id,
+            )
+            agent = agent_service.status(agent_id=resolved_agent_id)
+        except AgentServiceError as exc:
+            return _map_agent_error(request=request, exc=exc)
+        logger.info(
+            "uninstall_agent_skill called, agent_id=%s runtime_type=%s skill_name=%s",
+            agent.id,
+            agent.runtime_type,
+            payload.skill_name,
+        )
+        try:
+            resolved_skill_service = _resolve_skill_service(
+                runtime_type=agent.runtime_type,
+                openclaw_skill_service=resolved_openclaw_skill_service,
+                opencode_skill_service=resolved_opencode_skill_service,
+            )
+            uninstall_result = resolved_skill_service.uninstall_skill(
+                agent_id=agent.id,
+                skill_name=payload.skill_name,
+            )
+            return {
+                "agent_id": agent.id,
+                "runtime_type": agent.runtime_type,
+                **uninstall_result,
+            }
+        except AgentSkillServiceError as exc:
+            logger.warning(
+                "uninstall_agent_skill failed, runtime_type=%s code=%s",
+                agent.runtime_type,
+                exc.code,
+            )
+            return _map_agent_skill_error(request=request, exc=exc)
+        except Exception as exc:
+            logger.exception(
+                "uninstall_agent_skill unexpected error, agent_id=%s runtime_type=%s",
+                agent.id,
+                agent.runtime_type,
+            )
+            return _error_response(
+                request=request,
+                status_code=500,
+                code="INTERNAL_SERVER_ERROR",
+                message="internal server error",
+                details={
+                    "runtime_type": agent.runtime_type,
+                    "reason": str(exc),
+                },
+            )
 
     @router.get("/list", response_model=None)
     def list_agents(

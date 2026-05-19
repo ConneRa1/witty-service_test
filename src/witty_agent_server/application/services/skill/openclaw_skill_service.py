@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import logging
+import re
+import subprocess
 from typing import Any
 
 from witty_agent_server.application.services.skill.base import AgentSkillServiceBase
 from witty_agent_server.application.services.skill.errors import (
+    OpenClawSkillsInstallError,
     OpenClawSkillsQueryError,
+    OpenClawSkillsUninstallError,
 )
 from witty_agent_server.infra.ws.openclaw_gateway_client import (
     OpenClawGatewayClientError,
@@ -82,3 +86,154 @@ class OpenClawSkillService(AgentSkillServiceBase):
             "filePath": item.get("filePath"),
             "source": item.get("source"),
         }
+
+    def install_skill(
+        self,
+        *,
+        agent_id: str | None = None,
+        skill_name: str,
+    ) -> dict[str, Any]:
+        """优先通过 clawhub 命令安装，失败时回退 gateway RPC 安装。"""
+        normalized_name = self._normalize_skill_name(
+            skill_name=skill_name,
+            error_cls=OpenClawSkillsInstallError,
+        )
+
+        try:
+            self._install_skill_via_clawhub(normalized_name)
+            install_channel = "clawhub_cmd"
+        except OpenClawSkillsInstallError as cmd_exc:
+            logger.warning(
+                (
+                    "install_skill clawhub command failed, fallback to gateway rpc, "
+                    "runtime_type=%s agent_id=%s skill_name=%s code=%s message=%s"
+                ),
+                self.runtime_type,
+                agent_id,
+                normalized_name,
+                cmd_exc.code,
+                cmd_exc.details.get("reason"),
+            )
+            try:
+                self._openclaw_client.install_skill(
+                    agent_id=agent_id,
+                    skill_name=normalized_name,
+                    version=None,
+                    force=None,
+                )
+                install_channel = "gateway_rpc"
+            except OpenClawGatewayClientError as rpc_exc:
+                raise OpenClawSkillsInstallError(
+                    runtime_type=self.runtime_type,
+                    skill_name=normalized_name,
+                    reason=(
+                        "clawhub install failed "
+                        f"({cmd_exc.details.get('reason')}); "
+                        "gateway rpc fallback failed "
+                        f"({rpc_exc.code}: {rpc_exc.message})"
+                    ),
+                ) from rpc_exc
+
+        logger.info(
+            "install_skill success, runtime_type=%s agent_id=%s skill_name=%s channel=%s",
+            self.runtime_type,
+            agent_id,
+            normalized_name,
+            install_channel,
+        )
+        return {
+            "runtime_type": self.runtime_type,
+            "skill_name": normalized_name,
+            "installed": True,
+            "install_channel": install_channel,
+        }
+
+    def _install_skill_via_clawhub(self, skill_name: str) -> None:
+        command = ["clawhub", "install", skill_name, "--force"]
+        try:
+            subprocess.run(command, check=True, capture_output=True, text=True)
+        except FileNotFoundError as exc:
+            raise OpenClawSkillsInstallError(
+                runtime_type=self.runtime_type,
+                skill_name=skill_name,
+                reason="clawhub command not found",
+            ) from exc
+        except subprocess.CalledProcessError as exc:
+            stderr = (exc.stderr or "").strip()
+            stdout = (exc.stdout or "").strip()
+            reason = stderr or stdout or f"clawhub exited with code {exc.returncode}"
+            raise OpenClawSkillsInstallError(
+                runtime_type=self.runtime_type,
+                skill_name=skill_name,
+                reason=reason,
+            ) from exc
+        except Exception as exc:  # pragma: no cover - fs/environment specific
+            raise OpenClawSkillsInstallError(
+                runtime_type=self.runtime_type,
+                skill_name=skill_name,
+                reason=str(exc),
+            ) from exc
+
+    def uninstall_skill(
+        self,
+        *,
+        agent_id: str | None = None,
+        skill_name: str,
+    ) -> dict[str, Any]:
+        del agent_id
+        normalized_name = self._normalize_skill_name(
+            skill_name=skill_name,
+            error_cls=OpenClawSkillsUninstallError,
+        )
+        command = ["clawhub", "uninstall", normalized_name, "--yes"]
+        try:
+            subprocess.run(command, check=True, capture_output=True, text=True)
+        except FileNotFoundError as exc:
+            raise OpenClawSkillsUninstallError(
+                runtime_type=self.runtime_type,
+                skill_name=normalized_name,
+                reason="clawhub command not found",
+            ) from exc
+        except subprocess.CalledProcessError as exc:
+            stderr = (exc.stderr or "").strip()
+            stdout = (exc.stdout or "").strip()
+            reason = stderr or stdout or f"clawhub exited with code {exc.returncode}"
+            raise OpenClawSkillsUninstallError(
+                runtime_type=self.runtime_type,
+                skill_name=normalized_name,
+                reason=reason,
+            ) from exc
+        except Exception as exc:  # pragma: no cover - fs/environment specific
+            raise OpenClawSkillsUninstallError(
+                runtime_type=self.runtime_type,
+                skill_name=normalized_name,
+                reason=str(exc),
+            ) from exc
+
+        return {
+            "runtime_type": self.runtime_type,
+            "skill_name": normalized_name,
+            "uninstalled": True,
+            "uninstall_channel": "clawhub_cmd",
+        }
+
+    def _normalize_skill_name(
+        self,
+        *,
+        skill_name: str,
+        error_cls: type[OpenClawSkillsInstallError] | type[OpenClawSkillsUninstallError],
+    ) -> str:
+        if not isinstance(skill_name, str) or not skill_name.strip():
+            raise error_cls(
+                runtime_type=self.runtime_type,
+                skill_name=skill_name,
+                reason="skill_name is empty",
+            )
+        normalized_name = skill_name.strip()
+        if re.search(r"[\\/]", normalized_name):
+            raise error_cls(
+                runtime_type=self.runtime_type,
+                skill_name=normalized_name,
+                reason="skill_name contains path separator",
+            )
+        return normalized_name

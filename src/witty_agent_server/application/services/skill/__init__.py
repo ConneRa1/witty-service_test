@@ -1,7 +1,9 @@
 from witty_agent_server.application.services.skill.base import AgentSkillServiceBase
 from witty_agent_server.application.services.skill.errors import (
     AgentSkillServiceError,
+    OpenClawSkillsInstallError,
     OpenClawSkillsQueryError,
+    OpenClawSkillsUninstallError,
     RuntimeSkillsNotSupportedError,
 )
 from witty_agent_server.application.services.skill.openclaw_skill_service import (
@@ -17,6 +19,8 @@ __all__ = [
     "AgentSkillServiceError",
     "RuntimeSkillsNotSupportedError",
     "OpenClawSkillsQueryError",
+    "OpenClawSkillsInstallError",
+    "OpenClawSkillsUninstallError",
     "OpenClawSkillService",
     "OpenCodeSkillService",
 ]

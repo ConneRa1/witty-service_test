@@ -20,3 +20,20 @@ class AgentSkillServiceBase(ABC):
     def list_skills(self, *, agent_id: str | None = None) -> dict[str, Any]:
         """查询当前 runtime 可用的技能列表。"""
 
+    @abstractmethod
+    def install_skill(
+        self,
+        *,
+        agent_id: str | None = None,
+        skill_name: str,
+    ) -> dict[str, Any]:
+        """安装技能到当前 runtime。"""
+
+    @abstractmethod
+    def uninstall_skill(
+        self,
+        *,
+        agent_id: str | None = None,
+        skill_name: str,
+    ) -> dict[str, Any]:
+        """卸载当前 runtime 中的技能。"""
