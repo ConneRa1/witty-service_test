@@ -489,9 +489,17 @@ class OpenClawGatewayClient(ClientBase):
             if event_name == "session.message":
                 message_payload = normalized_payload.get("message")
                 if isinstance(message_payload, dict):
+                    # 过滤reason为stop的thinking，但OpenClaw有时候会把最终assistant文本放在这个stop message里
                     stop_reason = message_payload.get("stopReason")
-                    # 过滤resaon为stop的thinking
-                    if stop_reason == "stop":
+                    content = message_payload.get("content")
+                    has_text = isinstance(content, list) and any(
+                            isinstance(item, dict)
+                            and item.get("type") == "text"
+                            and isinstance(item.get("text"), str)
+                            and item.get("text")
+                            for item in content
+                    )
+                    if stop_reason == "stop" and not has_text:
                         continue
             if event_name == "agent" and normalized_payload.get("stream") == "lifecycle":
                 phase = normalized_payload.get("data", {}).get("phase")

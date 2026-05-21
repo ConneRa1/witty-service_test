@@ -610,6 +610,8 @@ def _normalize_mcp_server(
         server["workingDirectory"] = obj["workingDirectory"]
     if obj.get("url"):
         server["url"] = obj["url"]
+    if obj.get("timeout") is not None:
+        server["timeout"] = obj["timeout"]
     headers = copy.deepcopy(obj.get("headers") or {})
     api_key = obj.get("apiKey")
     if api_key and "Authorization" not in headers:
@@ -670,6 +672,8 @@ def _mcp_phase(
                 else:
                     raise FileNotFoundError(f"mcp[{name}] source 不存在: {src}")
             name, server = _normalize_mcp_server(obj, source_dir, item.get("name"))
+            if item.get("timeout") is not None:
+                server["timeout"] = item["timeout"]
             cfg["mcp"]["servers"][name] = server
             continue
 
@@ -759,6 +763,8 @@ def _mcp_phase(
             if not isinstance(payload, dict):
                 raise RuntimeError(f"mcporter 返回异常: {name}")
             _, server = _normalize_mcp_server(payload, None, name)
+            if item.get("timeout") is not None:
+                server["timeout"] = item["timeout"]
             cfg["mcp"]["servers"][name] = server
             continue
 

@@ -101,7 +101,7 @@ class OpenClawGatewayRuntime(RuntimeBase):
                 delta = event["payload"].get("delta")
                 if isinstance(delta, str) and delta:
                     yield {"type": "token_delta", "delta": delta}
-            elif event_type == "message.completed":
+            elif event_type in {"message.completed", "turn.completed"}:
                 yield {"type": "done"}
                 return
 
@@ -150,7 +150,7 @@ class OpenClawGatewayRuntime(RuntimeBase):
                     yield {"type": "message.started", "payload": {}}
                     return
                 if normalized_phase == "end":
-                    yield {"type": "message.completed", "payload": {"text": ""}}
+                    yield {"type": "turn.completed", "payload": {}}
                     return
                 if normalized_phase == "error":
                     code = self._pick_string(data, "code") or "OPENCLAW_LIFECYCLE_ERROR"
@@ -177,10 +177,72 @@ class OpenClawGatewayRuntime(RuntimeBase):
             nested = normalized_payload.get("message")
             if not isinstance(nested, dict):
                 return
-            yield from self._extract_thinking_events(nested)
+            yield from self._map_session_message(nested)
             return
         return
 
+    def _map_session_message(
+            self, message: Mapping[str, Any]
+        ) -> Iterator[RuntimeTurnEvent]:
+            role = message.get("role")
+            content = message.get("content")
+            if role == "toolResult":
+                yield from self._map_tool_result_message(message)
+                return
+            if role == "assistant":
+                if isinstance(content, list):
+                    for item in content:
+                        if not isinstance(item, dict) or item.get("type") != "toolCall":
+                            continue
+                        yield {
+                            "type": "tool.call.started",
+                            "payload": {
+                                "stage": "started",
+                                "tool_name": self._pick_string(item, "name") or "unknown",
+                                "tool_call_id": self._pick_string(item, "id"),
+                                "arguments": item.get("arguments"),
+                            },
+                        }
+                if message.get("stopReason") != "stop":
+                    yield from self._extract_thinking_events(message)
+                    return
+                if isinstance(content, list):
+                    text = "".join(
+                        item.get("text", "")
+                        for item in content
+                        if isinstance(item, dict)
+                        and item.get("type") == "text"
+                        and isinstance(item.get("text"), str)
+                    )
+                    if text:
+                        yield {"type": "message.completed", "payload": {"text": text}}
+                        return
+            yield from self._extract_thinking_events(message)
+    
+    def _map_tool_result_message(
+        self, message: Mapping[str, Any]
+    ) -> Iterator[RuntimeTurnEvent]:
+        tool_name = self._pick_string(message, "toolName", "name") or "unknown"
+        tool_call_id = self._pick_string(message, "toolCallId")
+        content = message.get("content", "")
+        details = message.get("details")
+        if not isinstance(details, dict):
+            details = {}
+        detail_status = details.get("status")
+        is_error = self._pick_bool(message, "isError")
+        yield {
+            "type": "tool.call.response",
+            "payload": {
+                "stage": "response",
+                "name": tool_name,
+                "tool_call_id": tool_call_id,
+                "content": content,
+                "is_error": bool(is_error) or detail_status == "error",
+                "details": details,
+                "exitCode": details.get("exitCode"),
+            },
+        }
+ 	 
     def _extract_thinking_events(
         self, message: Mapping[str, Any]
     ) -> Iterator[RuntimeTurnEvent]:
