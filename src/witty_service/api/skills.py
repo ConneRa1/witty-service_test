@@ -4,9 +4,11 @@ from fastapi import (
     APIRouter,
     BackgroundTasks,
     Depends,
+    File,
     HTTPException,
     Request,
     Response,
+    UploadFile,
     status,
 )
 
@@ -63,6 +65,43 @@ def create_skill_repository(
         repo_id=created.repo_id,
     )
     return _to_skill_repository_response(created)
+
+
+@router.post(
+    '/repos/upload',
+    response_model=SkillRepositoryResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def upload_skill_repository_archive(
+    file: UploadFile = File(...),
+    background_tasks: BackgroundTasks = None,
+    services: ServiceContainer = Depends(get_services),
+) -> SkillRepositoryResponse:
+    service = _build_service(services)
+    try:
+        created = service.create_skill_repository_from_archive(file)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+    
+    if background_tasks:
+        background_tasks.add_task(
+            SkillManager.discover_skill_repository_in_background,
+            repository=services.repository,
+            repo_id=created.repo_id,
+        )
+    
+    return SkillRepositoryResponse(
+        repo_id=created.repo_id,
+        repo_name=created.repo_name,
+        source_type=created.source_type,
+        branch=None,
+        url=None,
+        local_path=created.local_path or '',
+        skill_discover_status=created.skill_discover_status,
+        skill_num=created.skill_num,
+    )
 
 
 @router.patch('/repos/{repo_id}', response_model=SkillRepositoryResponse)

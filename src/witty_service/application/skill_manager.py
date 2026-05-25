@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -22,7 +23,6 @@ from witty_service.persistence.repositories import SkillRepositoryRecord, SkillR
 
 _logger = logging.getLogger(__name__)
 GIT_CLONE_RETRY_TIMES = 3
-LOCAL_ARCHIVE_BASE_DIR = Path('/tmp/witty-service-skill-repo-archives')
 
 
 class SkillDiscoverStatus:
@@ -32,9 +32,14 @@ class SkillDiscoverStatus:
     FAILED = 'failed'
 
 
-@dataclass(slots=True)
+@dataclass(slots=False)
 class SkillManager:
     repository: SqliteRepository
+
+    def __post_init__(self) -> None:
+        workspace_base = Path(os.getenv('WITTY_WORKSPACE_BASE', '~/witty-service/')).expanduser()
+        self._skill_archives_dir = workspace_base / 'skill-archives'
+        self._skill_archives_dir.mkdir(parents=True, exist_ok=True)
 
     def list_skill_repositories(self) -> list[SkillRepositoryRecord]:
         return self.repository.list_skill_repositories()
@@ -91,7 +96,45 @@ class SkillManager:
         )
 
     def delete_skill_repository(self, repo_id: str) -> None:
+        stored = self.get_repository_by_repo_id(repo_id)
+        if stored.source_type == SkillSourceType.LOCAL and stored.local_path:
+            local_path = Path(stored.local_path)
+            if local_path.is_file() and local_path.parent == self._skill_archives_dir:
+                try:
+                    local_path.unlink()
+                except Exception as exc:
+                    _logger.warning(f'Failed to clean up archive file {local_path}: {exc}')
+            extract_dir = self._resolve_extract_dir(stored)
+            if extract_dir.exists():
+                try:
+                    shutil.rmtree(extract_dir)
+                except Exception as exc:
+                    _logger.warning(f'Failed to clean up extract directory {extract_dir}: {exc}')
         self.repository.delete_skill_repository(repo_id)
+
+    def create_skill_repository_from_archive(
+        self, file: 'UploadFile'  # type: ignore[name-defined]
+    ) -> SkillRepositoryRecord:
+        repository_name = file.filename
+        if not repository_name.endswith('.zip'):
+            raise ValueError('Only ZIP files are supported for upload')
+        existing_repo = self.repository.get_skill_repository_by_name(repository_name)
+        if existing_repo is not None:
+            raise ValueError(
+                f'Skill repository "{repository_name}" already exists with repo_id "{existing_repo.repo_id}"'
+            )        
+
+        archive_path = self._skill_archives_dir / repository_name
+        archive_path.write_bytes(file.file.read())
+
+        return self.repository.create_skill_repository(
+            name=repository_name,
+            source_type=SkillSourceType.LOCAL,
+            branch=None,
+            url=None,
+            local_path=str(archive_path),
+            skill_discover_status=SkillDiscoverStatus.INIT,
+        )
 
     def get_repository_by_repo_id(self, repo_id: str) -> SkillRepositoryRecord:
         repository = self.repository.get_skill_repository(repo_id)
@@ -193,6 +236,24 @@ class SkillManager:
 
     def get_skill_by_skill_id(self, skill_id: str) -> SkillRecord | None:
         return self.repository.get_skill_by_skill_id(skill_id)
+
+    def get_skill_source_path(self, skill: SkillRecord) -> str | None:
+        if skill.repo_id is None or skill.relative_path is None:
+            return None
+        repo = self.repository.get_skill_repository(skill.repo_id)
+        if repo is None or repo.source_type != SkillSourceType.LOCAL:
+            return None
+        local_path = Path(str(repo.local_path)).expanduser().resolve(strict=False)
+        if local_path.is_file() and local_path.suffix == '.zip':
+            extract_dir = self._resolve_extract_dir(repo)
+            repo_root = self._find_archive_repo_root(extract_dir) if extract_dir.exists() else extract_dir
+        else:
+            repo_root = local_path
+        skill_file = repo_root / skill.relative_path
+        skill_dir = skill_file.parent
+        if not skill_dir.exists():
+            return None
+        return str(skill_dir)
 
     def list_skills(self) -> list[SkillRecord]:
         return self.repository.list_skills()
@@ -386,14 +447,17 @@ class SkillManager:
         local_path = Path(str(repo.local_path)).expanduser().resolve(strict=False)
         if local_path.is_file() and local_path.suffix == '.zip':
             extract_dir = self._prepare_archive_extract_dir(repo)
-            repo_root = self._extract_local_archive_to_dir(
-                repo, local_path, extract_dir
-            )
+            repo_root = self._extract_local_archive_to_dir(local_path, extract_dir            )
             return self._scan_local_skill_repository_root(repo, repo_root)
         return self._scan_local_skill_repository_root(repo, local_path)
 
+    def _resolve_extract_dir(self, repo: SkillRepositoryRecord) -> Path:
+        local_path = Path(str(repo.local_path)).expanduser().resolve(strict=False)
+        stem = local_path.stem if local_path.is_file() and local_path.suffix == '.zip' else local_path.name
+        return self._skill_archives_dir / f'{stem}-{repo.repo_id}'
+
     def _prepare_archive_extract_dir(self, repo: SkillRepositoryRecord) -> Path:
-        extract_dir = LOCAL_ARCHIVE_BASE_DIR / repo.repo_id
+        extract_dir = self._resolve_extract_dir(repo)
         if extract_dir.exists():
             shutil.rmtree(extract_dir)
         extract_dir.mkdir(parents=True, exist_ok=True)
@@ -401,11 +465,9 @@ class SkillManager:
 
     def _extract_local_archive_to_dir(
         self,
-        repo: SkillRepositoryRecord,
         archive_path: Path,
         extract_dir: Path,
     ) -> Path:
-        del repo
         with ZipFile(archive_path) as archive:
             archive.extractall(extract_dir)
         return self._find_archive_repo_root(extract_dir)
