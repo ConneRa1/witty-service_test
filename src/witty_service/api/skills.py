@@ -60,7 +60,7 @@ def create_skill_repository_from_git(
     except ValueError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     background_tasks.add_task(
-        SkillManager.discover_skill_repository_in_background,
+        service.discover_skill_repository_in_background,
         repository=services.repository,
         repo_id=created.repo_id,
     )
@@ -73,8 +73,8 @@ def create_skill_repository_from_git(
     status_code=status.HTTP_201_CREATED,
 )
 def upload_skill_repository_archive(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    background_tasks: BackgroundTasks = None,
     services: ServiceContainer = Depends(get_services),
 ) -> SkillRepositoryResponse:
     service = _build_service(services)
@@ -85,12 +85,11 @@ def upload_skill_repository_archive(
     except Exception as exc:
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
     
-    if background_tasks:
-        background_tasks.add_task(
-            SkillManager.discover_skill_repository_in_background,
-            repository=services.repository,
-            repo_id=created.repo_id,
-        )
+    background_tasks.add_task(
+        service.discover_skill_repository_in_background,    
+        repository=services.repository,
+        repo_id=created.repo_id,
+    )
     
     return SkillRepositoryResponse(
         repo_id=created.repo_id,
