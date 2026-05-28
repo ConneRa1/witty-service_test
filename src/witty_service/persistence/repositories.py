@@ -49,7 +49,6 @@ class ModelRecord:
     provider: str
     api_key: str
     api_base_url: str | None
-    description: str
     enabled: bool
     max_tokens: int
     temperature: float
@@ -913,7 +912,6 @@ class SqliteRepository:
         provider: str,
         api_key: str,
         api_base_url: str | None = None,
-        description: str = "",
         enabled: bool = True,
         max_tokens: int = 4096,
         temperature: float = 0.7,
@@ -925,7 +923,6 @@ class SqliteRepository:
             provider=provider,
             api_key=api_key,
             api_base_url=api_base_url,
-            description=description,
             enabled=enabled,
             max_tokens=max_tokens,
             temperature=temperature,
@@ -940,7 +937,6 @@ class SqliteRepository:
         provider: str,
         api_key: str,
         api_base_url: str | None = None,
-        description: str = "",
         enabled: bool = True,
         max_tokens: int = 4096,
         temperature: float = 0.7,
@@ -953,7 +949,6 @@ class SqliteRepository:
                 provider=provider,
                 api_key=api_key,
                 api_base_url=api_base_url,
-                description=description,
                 enabled=enabled,
                 max_tokens=max_tokens,
                 temperature=temperature,
@@ -984,6 +979,44 @@ class SqliteRepository:
             session.delete(row)
             session.commit()
 
+    def update_model(
+        self,
+        model_id: str,
+        *,
+        name: str | None = None,
+        provider: str | None = None,
+        api_key: str | None = None,
+        api_base_url: str | None = None,
+        enabled: bool | None = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        is_default: bool | None = None,
+    ) -> ModelRecord:
+        with self._session_factory() as session:
+            row = session.get(ModelORM, model_id)
+            if row is None:
+                raise KeyError(f"Model not found: {model_id}")
+            if name is not None:
+                row.name = name
+            if provider is not None:
+                row.provider = provider
+            if api_key is not None:
+                row.api_key = api_key
+            if api_base_url is not None:
+                row.api_base_url = api_base_url
+            if enabled is not None:
+                row.enabled = enabled
+            if max_tokens is not None:
+                row.max_tokens = max_tokens
+            if temperature is not None:
+                row.temperature = temperature
+            if is_default is not None:
+                row.is_default = is_default
+            row.updated_at = datetime.now(timezone.utc)
+            session.commit()
+            session.refresh(row)
+            return self._to_model_record(row)
+
     @staticmethod
     def _to_model_record(row: ModelORM) -> ModelRecord:
         return ModelRecord(
@@ -992,7 +1025,6 @@ class SqliteRepository:
             provider=row.provider,
             api_key=row.api_key,
             api_base_url=row.api_base_url,
-            description=row.description,
             enabled=row.enabled,
             max_tokens=row.max_tokens,
             temperature=row.temperature,

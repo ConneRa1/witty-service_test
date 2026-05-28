@@ -98,12 +98,21 @@ class CreateModelRequest(BaseModel):
     provider: str = Field(min_length=1)
     api_key: str = Field(min_length=1)
     api_base_url: str | None = None
-    description: str = ""
     enabled: bool = True
     max_tokens: int = 4096
     temperature: float = 0.7
     is_default: bool = False
 
+
+class UpdateModelRequest(BaseModel):
+    name: str | None = Field(None, min_length=1)
+    provider: str | None = Field(None, min_length=1)
+    api_key: str | None = Field(None, min_length=1)
+    api_base_url: str | None = None
+    enabled: bool | None = None
+    max_tokens: int | None = None
+    temperature: float | None = None
+    is_default: bool | None = None
 
 class ModelResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -112,7 +121,6 @@ class ModelResponse(BaseModel):
     name: str
     provider: str
     api_base_url: str | None
-    description: str
     enabled: bool
     max_tokens: int
     temperature: float
