@@ -1,9 +1,21 @@
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Any
+from datetime import datetime, timezone
+from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PlainSerializer
+
+
+def _format_utc_datetime(dt: datetime) -> str:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat().replace("+00:00", "Z")
+
+
+UtcDatetime = Annotated[
+    datetime,
+    PlainSerializer(_format_utc_datetime, return_type=str),
+]
 
 
 class CreateAgentRequest(BaseModel):
@@ -35,7 +47,7 @@ class AgentSkillResponse(BaseModel):
     source_type: str
     repo_id: str | None
     skill_name: str
-    installed_at: datetime
+    installed_at: UtcDatetime
     relative_path: str | None = None
     metadata: dict[str, Any] | None = None
     skill_source: str | None = None
@@ -55,8 +67,8 @@ class AgentResponse(BaseModel):
     workspace_path: str
     idle_timeout_seconds: int
     has_scheduled_tasks: bool
-    created_at: datetime
-    updated_at: datetime
+    created_at: UtcDatetime
+    updated_at: UtcDatetime
     default_session_id: str | None = None
     process_port: int | None = None
     skills: list[dict[str, Any]] = Field(default_factory=list)
@@ -70,8 +82,10 @@ class SessionResponse(BaseModel):
     status: str
     context_initialized: bool = False
     runtime_type: str | None = None
-    created_at: datetime
-    updated_at: datetime
+    title: str | None = None
+    pinned: bool = False
+    created_at: UtcDatetime
+    updated_at: UtcDatetime
 
 
 class MessageEventsResponse(BaseModel):
@@ -84,12 +98,21 @@ class CreateModelRequest(BaseModel):
     provider: str = Field(min_length=1)
     api_key: str = Field(min_length=1)
     api_base_url: str | None = None
-    description: str = ""
     enabled: bool = True
     max_tokens: int = 4096
     temperature: float = 0.7
     is_default: bool = False
 
+
+class UpdateModelRequest(BaseModel):
+    name: str | None = Field(None, min_length=1)
+    provider: str | None = Field(None, min_length=1)
+    api_key: str | None = Field(None, min_length=1)
+    api_base_url: str | None = None
+    enabled: bool | None = None
+    max_tokens: int | None = None
+    temperature: float | None = None
+    is_default: bool | None = None
 
 class ModelResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -98,13 +121,12 @@ class ModelResponse(BaseModel):
     name: str
     provider: str
     api_base_url: str | None
-    description: str
     enabled: bool
     max_tokens: int
     temperature: float
     is_default: bool
-    created_at: datetime
-    updated_at: datetime
+    created_at: UtcDatetime
+    updated_at: UtcDatetime
 
 
 class SessionEventItem(BaseModel):
@@ -113,7 +135,7 @@ class SessionEventItem(BaseModel):
     type: str
     source: str | None = None
     payload: dict[str, Any]
-    timestamp: datetime
+    timestamp: UtcDatetime
 
 
 class PaginationInfo(BaseModel):
@@ -130,6 +152,44 @@ class SessionEventPage(BaseModel):
 class SessionEventsResponse(BaseModel):
     items: list[SessionEventItem]
     pagination: PaginationInfo
+
+class ConversationSummaryResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    agent_id: str
+    title: str | None = None
+    pinned: bool = False
+    status: str
+    message_count: int = 0
+    last_message_status: str | None = None
+    first_message_preview: str | None = None
+    created_at: UtcDatetime
+    updated_at: UtcDatetime
+
+
+class AgentWithConversationsResponse(AgentResponse):
+    conversations: list[ConversationSummaryResponse] = Field(default_factory=list)
+
+
+class ConversationDetailResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    agent_id: str
+    title: str | None = None
+    pinned: bool = False
+    status: str
+    messages: list[dict[str, Any]] = Field(default_factory=list)
+    has_more: bool = False
+    created_at: UtcDatetime
+    updated_at: UtcDatetime
+
+
+class UpdateConversationRequest(BaseModel):
+    title: str | None = None
+    pinned: bool | None = None
+
 
 class SkillSourceType:
     GIT = 'git'

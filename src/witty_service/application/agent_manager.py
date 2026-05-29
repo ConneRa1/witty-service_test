@@ -21,6 +21,7 @@ from witty_service.adapter.websocket_protocol import OutboundMessage
 from witty_service.adapter.websocket_client import WebSocketClient
 from witty_service.domain.enums import AgentStatus, can_transition
 from witty_service.domain.errors import DomainError
+from witty_service.persistence.orm import MessageStatus
 from witty_service.persistence.repositories import AgentRecord, SessionRecord
 from witty_service.sandbox.base import SandboxHandle, SandboxStatus, sandbox_not_found
 from witty_service.storage.runtime_backup import RuntimeBackupStore
@@ -44,6 +45,21 @@ SKILL_SYNC_FAILED = "SKILL_SYNC_FAILED"
 AGENT_SKILL_INSTALL_FAILED = "AGENT_SKILL_INSTALL_FAILED"
 AGENT_SKILL_UNINSTALL_FAILED = "AGENT_SKILL_UNINSTALL_FAILED"
 
+INTERRUPTION_PREFIX = """[CRITICAL SYSTEM INSTRUCTION - OVERRIDE ALL PREVIOUS CONTEXT]
+
+The assistant's previous response in the conversation history was INTERRUPTED and INCOMPLETE before being sent to you.
+
+You MUST follow these rules with HIGHEST PRIORITY:
+
+1. IGNORE the ENTIRE interrupted assistant message completely - treat it as if it never existed
+2. DO NOT continue, complete, reference, or acknowledge that interrupted response in ANY way
+3. DO NOT use phrases like "continuing from", "as I was saying", "to complete my previous thought"
+4. Answer ONLY and DIRECTLY the user's message below, starting from a fresh response
+
+The user's current message (ignore everything before this):
+
+"""
+
 
 @dataclass(slots=True, frozen=True)
 class AgentCreateRequest:
@@ -59,7 +75,6 @@ class AgentCreateRequest:
 @dataclass(slots=True, frozen=True)
 class AgentCreateResult:
     agent: AgentRecord
-    default_session: SessionRecord
 
 
 class SandboxState(Protocol):
@@ -114,6 +129,52 @@ class AgentRepository(Protocol):
         metadata_json: dict[str, Any] | None = None,
     ) -> str: ...
 
+    def create_message_event_with_retry(
+        self,
+        *,
+        agent_id: str,
+        session_id: str,
+        event_type: str,
+        payload_json: dict[str, Any],
+        seq_no: int,
+        message_id: str | None = None,
+        max_retries: int = 5,
+    ) -> tuple[str, int]: ...
+
+    def create_assistant_message_and_bind_events(
+        self,
+        *,
+        agent_id: str,
+        session_id: str,
+        content: str,
+        event_ids: list[str],
+        metadata_json: dict[str, Any] | None = None,
+    ) -> str: ...
+
+    def get_last_assistant_status(self, session_id: str) -> str | None: ...
+
+    def get_first_user_message(self, session_id: str) -> str | None: ...
+
+    def update_session_metadata(
+        self,
+        session_id: str,
+        *,
+        title: str | None = None,
+        pinned: bool | None = None,
+    ) -> Any: ...
+
+    def update_message_content(self, message_id: str, content: str) -> None: ...
+
+    def update_message_stream_at(self, message_id: str) -> None: ...
+
+    def update_message_status(self, message_id: str, status: Any) -> None: ...
+
+    def find_stale_generating_messages(
+        self, stale_threshold_seconds: int
+    ) -> list[Any]: ...
+
+    def compact_message_delta_events(self, message_id: str) -> None: ...
+
     def delete_agent(self, agent_id: str) -> None: ...
 
     def upsert_builtin_skill(
@@ -163,6 +224,77 @@ class SandboxBackend(Protocol):
     def endpoint(self, handle: SandboxHandle | str, **kwargs: Any) -> Any: ...
 
     def cleanup(self, handle: SandboxHandle | str, **kwargs: Any) -> None: ...
+
+
+class SessionStreamRegistry:
+    """Broadcast stream events to multiple SSE subscribers per session.
+
+    When a client disconnects (page refresh), the background WS consumer
+    keeps running so the generation completes and events are persisted.
+    Reconnecting clients get buffered events first, then live events.
+    """
+
+    def __init__(self) -> None:
+        self._subscribers: dict[str, list[asyncio.Queue[dict | None]]] = {}
+        self._buffers: dict[str, list[dict[str, Any]]] = {}
+        self._terminated: set[str] = set()
+        self._generation: dict[str, int] = {}
+
+    def start_stream(self, session_id: str) -> int:
+        self.end_stream(session_id)
+        gen = self._generation.get(session_id, 0) + 1
+        self._generation[session_id] = gen
+        self._subscribers[session_id] = []
+        self._buffers[session_id] = []
+        self._terminated.discard(session_id)
+        return gen
+
+    def push_event(self, session_id: str, event: dict[str, Any], generation: int) -> None:
+        if self._generation.get(session_id) != generation:
+            return  # Stale generation — ignore
+        if session_id in self._buffers:
+            self._buffers[session_id].append(event)
+        for q in self._subscribers.get(session_id, []):
+            try:
+                q.put_nowait(event)
+            except asyncio.QueueFull:
+                pass
+
+    def end_stream(self, session_id: str) -> None:
+        self._terminated.add(session_id)
+        for q in self._subscribers.get(session_id, []):
+            try:
+                q.put_nowait(None)  # sentinel
+            except asyncio.QueueFull:
+                pass
+
+    def is_active(self, session_id: str) -> bool:
+        return session_id in self._subscribers and session_id not in self._terminated
+
+    def get_buffered_events(self, session_id: str) -> list[dict[str, Any]]:
+        return list(self._buffers.get(session_id, []))
+
+    def subscribe(self, session_id: str) -> asyncio.Queue[dict | None]:
+        q: asyncio.Queue[dict | None] = asyncio.Queue()
+        self._subscribers.setdefault(session_id, []).append(q)
+        return q
+
+    def unsubscribe(self, session_id: str, queue: asyncio.Queue[dict | None]) -> None:
+        subs = self._subscribers.get(session_id, [])
+        if queue in subs:
+            subs.remove(queue)
+
+    def has_subscribers(self, session_id: str) -> bool:
+        return bool(self._subscribers.get(session_id, []))
+
+    def cleanup(self, session_id: str) -> None:
+        self._subscribers.pop(session_id, None)
+        self._buffers.pop(session_id, None)
+        self._terminated.discard(session_id)
+        self._generation.pop(session_id, None)
+
+
+_stream_registry = SessionStreamRegistry()
 
 
 class AgentManager:
@@ -467,16 +599,6 @@ class AgentManager:
             finally:
                 client.close()
 
-            default_session = self._session_manager.upsert_session(
-                session_id=session_data["id"],
-                agent_id=agent_id,
-                status=session_data.get("status", "idle"),
-                context_initialized=session_data.get("context_initialized", True),
-                runtime_type=session_data.get("runtime_type"),
-                created_at=datetime.fromisoformat(session_data["created_at"]) if "created_at" in session_data else None,
-                remote_runtime_agent_id=remote_runtime_agent_id,
-            )
-            logger.info(f"[AgentManager] Default session created: {default_session.id}")
             running_agent = self._repository.update_agent_status(
                 agent_id,
                 AgentStatus.running,
@@ -484,7 +606,6 @@ class AgentManager:
             logger.info(f"[AgentManager] Agent status updated to running, creation complete")
             return AgentCreateResult(
                 agent=replace(running_agent, workspace_path=workspace_path),
-                default_session=default_session,
             )
         except Exception as exc:
             logger.error(f"[AgentManager] Agent creation failed with error: {exc}")
@@ -670,7 +791,10 @@ class AgentManager:
             role="user",
             content=content,
         )
-        ws_client = await self._prepare_ws_message_client(agent_id, session_id, content)
+        self._auto_generate_session_title(agent_id, session_id)
+
+        ws_content = self._maybe_prepend_interruption_prefix(session_id, content)
+        ws_client = await self._prepare_ws_message_client(agent_id, session_id, ws_content)
 
         self._logger.info(
             "WebSocket client ready: ws_client_id=%s is_connected=%s agent_id=%s session_id=%s",
@@ -770,87 +894,231 @@ class AgentManager:
             role="user",
             content=content,
         )
-        ws_client = await self._prepare_ws_message_client(agent_id, session_id, content)
+        self._auto_generate_session_title(agent_id, session_id)
 
+        ws_content = self._maybe_prepend_interruption_prefix(session_id, content)
+        ws_client = await self._prepare_ws_message_client(agent_id, session_id, ws_content)
+
+        # Start a new stream generation
+        stream_gen = _stream_registry.start_stream(session_id)
+        queue = _stream_registry.subscribe(session_id)
+
+        seq_no = 0
+        assistant_text = ""
+        assistant_msg_id: str | None = None
         terminal_received = False
-        try:
-            async for event in ws_client.recv():
-                event_dict = dict(event)
-                self._sync_session_state_from_event(
+        tokens_since_checkpoint = 0
+        last_checkpoint_time = time.monotonic()
+        TOKENS_PER_CHECKPOINT = 100
+        CHECKPOINT_INTERVAL_S = 2.0
+        sandbox_type = agent.sandbox_type
+
+        async def consume_ws() -> None:
+            """后台任务：消费 WebSocket 事件，持久化，并推送到stream_registry"""
+            nonlocal seq_no, assistant_text, assistant_msg_id, terminal_received
+            nonlocal tokens_since_checkpoint, last_checkpoint_time
+
+            try:
+                async for event in ws_client.recv():
+                    event_dict = dict(event)
+                    self._sync_session_state_from_event(
+                        agent_id=agent_id,
+                        session_id=session_id,
+                        event=event_dict,
+                    )
+
+                    if event_dict["type"] in {"client.error", "stream.error"}:
+                        error_payload = event_dict.get("payload", {})
+                        error_code = error_payload.get("code", "UNKNOWN_ERROR")
+                        error_message = error_payload.get("message", "Unknown error from adaptor")
+                        self._logger.error(
+                            "Stream error in background consumer: agent_id=%s session_id=%s code=%s",
+                            agent_id, session_id, error_code,
+                        )
+                        _stream_registry.end_stream(session_id)
+                        return
+
+                    if self._should_filter_session_event(event_dict):
+                        self._logger.info(
+                            "filtered session state event from stream: agent_id=%s session_id=%s event_type=%s",
+                            agent_id, session_id, event_dict["type"],
+                        )
+                        continue
+
+                    if assistant_msg_id is None:
+                        assistant_msg_id = self._repository.create_message(
+                            agent_id=agent_id,
+                            session_id=session_id,
+                            role="assistant",
+                            content="",
+                            status=MessageStatus.generating,
+                        )
+
+                    seq_no += 1
+                    event_type = event_dict["type"]
+                    payload = event_dict.get("payload") if isinstance(event_dict.get("payload"), dict) else {}
+                    try:
+                        self._repository.create_message_event_with_retry(
+                            agent_id=agent_id,
+                            session_id=session_id,
+                            event_type=event_type,
+                            payload_json=payload,
+                            seq_no=seq_no,
+                            message_id=assistant_msg_id,
+                        )
+                    except Exception:
+                        self._logger.warning(
+                            "Failed to persist event: agent_id=%s session_id=%s event_type=%s",
+                            agent_id, session_id, event_type, exc_info=True,
+                        )
+
+                    if event_type == "message.delta":
+                        delta = payload.get("delta", "")
+                        assistant_text += delta
+                        tokens_since_checkpoint += len(delta) // 4
+                    elif event_type == "message.completed":
+                        completed_text = payload.get("text", "")
+                        if completed_text:
+                            assistant_text = completed_text
+
+                    now = time.monotonic()
+                    if assistant_msg_id and (
+                        tokens_since_checkpoint >= TOKENS_PER_CHECKPOINT
+                        or now - last_checkpoint_time >= CHECKPOINT_INTERVAL_S
+                        or event_type in {"message.completed", "turn.completed"}
+                    ):
+                        if assistant_text:
+                            try:
+                                self._repository.update_message_content(assistant_msg_id, assistant_text)
+                                self._repository.update_message_stream_at(assistant_msg_id)
+                            except Exception:
+                                self._logger.warning(
+                                    "Failed to update message content checkpoint: msg_id=%s",
+                                    assistant_msg_id, exc_info=True,
+                                )
+                        tokens_since_checkpoint = 0
+                        last_checkpoint_time = now
+
+                    if event_type in {"message.completed", "turn.completed"}:
+                        terminal_received = True
+                        if assistant_msg_id:
+                            try:
+                                self._repository.update_message_status(assistant_msg_id, MessageStatus.completed)
+                                self._logger.info(
+                                "update_message_status in ws: assistant_msg_id=%s state=%s",
+                                assistant_msg_id,
+                                MessageStatus.completed,
+                                )
+                            except Exception:
+                                self._logger.warning(
+                                    "Failed to update message status: msg_id=%s",
+                                    assistant_msg_id, exc_info=True,
+                                )
+                            try:
+                                self._repository.compact_message_delta_events(assistant_msg_id)
+                            except Exception:
+                                self._logger.warning(
+                                    "Failed to compact delta events: msg_id=%s",
+                                    assistant_msg_id, exc_info=True,
+                                )
+
+                    _stream_registry.push_event(session_id, event_dict, stream_gen)
+
+                    if event_type in {"message.completed", "turn.completed"}:
+                        break
+            except Exception:
+                self._logger.warning(
+                    "Background WS consumer error: agent_id=%s session_id=%s",
+                    agent_id, session_id, exc_info=True,
+                )
+            finally:
+                _stream_registry.end_stream(session_id)
+                _stream_registry.cleanup(session_id)
+                await self._close_ws_message_client(
                     agent_id=agent_id,
                     session_id=session_id,
-                    event=event_dict,
+                    ws_client=ws_client,
                 )
 
-                # Handle client.error events from witty-agent-server
-                if event_dict["type"] in {"client.error", "stream.error"}:
-                    error_payload = event_dict.get("payload", {})
-                    error_code = error_payload.get("code", "UNKNOWN_ERROR")
-                    error_message = error_payload.get("message", "Unknown error from adaptor")
-                    raise DomainError(
-                        code=error_code,
-                        message=error_message,
-                        details={"session_id": session_id, "agent_id": agent_id},
-                    )
-                if self._should_filter_session_event(event_dict):
-                    self._logger.info(
-                        "filtered session state event from stream: agent_id=%s session_id=%s event_type=%s",
-                        agent_id,
-                        session_id,
-                        event_dict["type"],
-                    )
-                    continue
+        bg_task = asyncio.create_task(consume_ws())
 
+        try:
+            while True:
+                event_dict = await queue.get()
+                if event_dict is None:  # sentinel — stream ended
+                    break
                 yield {
-                    "sandbox_type": agent.sandbox_type,
+                    "sandbox_type": sandbox_type,
                     "event": event_dict,
                 }
-                if event_dict["type"] in {"message.completed", "turn.completed"}:
-                    terminal_received = True
-                    break
         except GeneratorExit:
-            if not terminal_received:
-                self._logger.info(
-                    "User aborted SSE stream: agent_id=%s session_id=%s — sending message.abort via WS",
-                    agent_id,
-                    session_id,
-                )
-                await self._handle_user_abort(ws_client, agent_id, session_id)
-            else:
-                self._logger.info(
-                    "User aborted SSE stream after terminal event: agent_id=%s session_id=%s — skip abort",
-                    agent_id,
-                    session_id,
-                )
+            self._logger.info(
+                "SSE client disconnected: agent_id=%s session_id=%s — background consumer continues",
+                agent_id, session_id,
+            )
+            _stream_registry.unsubscribe(session_id, queue)
             raise
         except asyncio.CancelledError:
-            if not terminal_received:
-                self._logger.info(
-                    "SSE stream cancelled: agent_id=%s session_id=%s — sending message.abort via WS",
-                    agent_id,
-                    session_id,
-                )
-                await self._handle_user_abort(ws_client, agent_id, session_id)
-            else:
-                self._logger.info(
-                    "SSE stream cancelled after terminal event: agent_id=%s session_id=%s — skip abort",
-                    agent_id,
-                    session_id,
-                )
+            self._logger.info(
+                "SSE stream cancelled: agent_id=%s session_id=%s — background consumer continues",
+                agent_id, session_id,
+            )
+            _stream_registry.unsubscribe(session_id, queue)
             raise
         except Exception:
-            self._session_manager.upsert_session(
-                session_id=session_id,
-                agent_id=agent_id,
-                status="error",
+            self._logger.exception(
+                "SSE stream error: agent_id=%s session_id=%s",
+                agent_id, session_id,
             )
+            _stream_registry.unsubscribe(session_id, queue)
             raise
-        finally:
-            await self._close_ws_message_client(
-                agent_id=agent_id,
-                session_id=session_id,
-                ws_client=ws_client,
+
+    async def reconnect_stream(
+        self,
+        agent_id: str,
+        session_id: str,
+    ) -> AsyncIterator[dict[str, Any]]:
+        agent = self._get_agent(agent_id)
+        sandbox_type = agent.sandbox_type
+
+        if not _stream_registry.is_active(session_id):
+            self._logger.info(
+                "reconnect_stream: no active stream for session_id=%s", session_id,
             )
+            return
+
+        # Replay buffered events
+        buffered = _stream_registry.get_buffered_events(session_id)
+        self._logger.info(
+            "reconnect_stream: replaying %d buffered events for session_id=%s",
+            len(buffered), session_id,
+        )
+        for event_dict in buffered:
+            yield {
+                "sandbox_type": sandbox_type,
+                "event": event_dict,
+            }
+
+        # Subscribe to live events
+        queue = _stream_registry.subscribe(session_id)
+        try:
+            while True:
+                event_dict = await queue.get()
+                if event_dict is None:
+                    break
+                yield {
+                    "sandbox_type": sandbox_type,
+                    "event": event_dict,
+                }
+        except GeneratorExit:
+            _stream_registry.unsubscribe(session_id, queue)
+            raise
+        except asyncio.CancelledError:
+            _stream_registry.unsubscribe(session_id, queue)
+            raise
+        except Exception:
+            _stream_registry.unsubscribe(session_id, queue)
+            raise
 
     async def _handle_user_abort(
         self,
@@ -979,6 +1247,20 @@ class AgentManager:
             )
         finally:
             await adaptor_client.close()
+        generating_msg = self._repository.find_generating_message_for_session(session_id)
+        if generating_msg is not None:
+            try:
+                self._repository.update_message_status(generating_msg.id, MessageStatus.interrupted)
+                self._logger.info(
+                    "update_message_status in ws: generating_msg.id=%s state=%s",
+                    generating_msg.id,
+                    MessageStatus.interrupted
+                )
+            except Exception:
+                self._logger.warning(
+                    "Failed to mark message interrupted after abort: msg_id=%s",
+                    generating_msg.id, exc_info=True,
+                )
 
     async def delete_agent(self, agent_id: str) -> None:
         agent = self._get_agent(agent_id)
@@ -1065,6 +1347,12 @@ class AgentManager:
             sandbox_id=request.sandbox_id,
             has_scheduled_tasks=request.has_scheduled_tasks,
         )
+
+    def _maybe_prepend_interruption_prefix(self, session_id: str, content: str) -> str:
+        if self._repository.get_last_assistant_status(session_id) == "interrupted":
+            self._logger.info("Last assistant message was interrupted, prepending interruption prefix: session_id=%s", session_id)
+            return INTERRUPTION_PREFIX + content
+        return content
 
     def _get_agent(self, agent_id: str) -> AgentRecord:
         agent = self._repository.get_agent(agent_id)
@@ -1211,6 +1499,24 @@ class AgentManager:
                 session_id=session_id,
                 agent_id=agent_id,
                 status="error",
+            )
+
+    def _auto_generate_session_title(self, agent_id: str, session_id: str) -> None:
+        """自动生成会话标题"""
+        try:
+            session = self._session_manager.get_session(agent_id, session_id)
+            if session.title:
+                return
+            first_msg = self._repository.get_first_user_message(session_id)
+            if first_msg:
+                title = first_msg[:30].replace("\n", " ")
+                self._repository.update_session_metadata(session_id, title=title)
+        except Exception:
+            self._logger.warning(
+                "Failed to auto-generate session title: agent_id=%s session_id=%s",
+                agent_id,
+                session_id,
+                exc_info=True,
             )
 
     def _should_filter_session_event(self, event: dict[str, Any]) -> bool:

@@ -15,6 +15,7 @@ from witty_service.persistence.orm import (
     AgentRuntimeStateORM,
     MessageEventORM,
     MessageORM,
+    MessageStatus,
     ModelORM,
     SessionORM,
     SessionStatus,
@@ -48,7 +49,6 @@ class ModelRecord:
     provider: str
     api_key: str
     api_base_url: str | None
-    description: str
     enabled: bool
     max_tokens: int
     temperature: float
@@ -65,6 +65,8 @@ class SessionRecord:
     status: str
     created_at: datetime
     updated_at: datetime
+    title: str | None = None
+    pinned: bool = False
 
 
 @dataclass(slots=True)
@@ -125,6 +127,108 @@ class AgentSkillRecord:
     metadata: dict[str, Any] | None = None
     skill_source: str | None = None
     skill_md_url: str | None = None
+
+
+def _format_utc_datetime(dt: datetime) -> str | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat().replace("+00:00", "Z")
+
+
+def _assemble_message(msg: MessageORM, events: list[MessageEventORM]) -> dict[str, Any]:
+    tool_calls: list[dict[str, Any]] = []
+    tool_calls_by_id: dict[str, dict[str, Any]] = {}
+    thinking: list[str] = []
+    usage: dict[str, Any] | None = None
+    event_items: list[dict[str, Any]] = []
+
+    for evt in events:
+        payload = dict(evt.payload_json or {})
+        item: dict[str, Any] = {
+            "type": evt.event_type,
+            "timestamp": _format_utc_datetime(evt.created_at),
+        }
+
+        if evt.event_type == "tool.call.started":
+            tool_name = payload.get("tool_name", "")
+            tool_call_id = payload.get("tool_call_id", "")
+            tc: dict[str, Any] = {
+                "id": tool_call_id,
+                "name": tool_name,
+                "status": "running",
+                "input": payload.get("arguments"),
+            }
+            tool_calls.append(tc)
+            tool_calls_by_id[tool_call_id] = tc
+            item["toolCall"] = {
+                "id": tool_call_id,
+                "name": tool_name,
+                "status": "running",
+                "input": payload.get("arguments"),
+            }
+
+        elif evt.event_type == "tool.call.response":
+            tool_call_id = payload.get("tool_call_id", "")
+            if tool_call_id and tool_call_id in tool_calls_by_id:
+                tc = tool_calls_by_id[tool_call_id]
+                tc["status"] = "completed" if not payload.get("is_error") else "error"
+                tc["output"] = payload.get("content")
+                tc["duration"] = payload.get("duration")
+                if payload.get("is_error"):
+                    tc["error"] = payload.get("content")
+                item["toolCall"] = {
+                    "id": tool_call_id,
+                    "name": tc.get("name", ""),
+                    "status": tc["status"],
+                    "input": tc.get("input"),
+                    "output": payload.get("content"),
+                    "error": payload.get("content") if payload.get("is_error") else None,
+                    "duration": payload.get("duration"),
+                }
+
+        elif evt.event_type == "thinking":
+            content = payload.get("thinking", "") 
+            if content:
+                thinking.append(content)
+            item["content"] = content
+        
+        elif evt.event_type == "message.delta":
+            continue
+
+        elif evt.event_type == "usage.updated":
+            usage = {
+                "inputTokens": payload.get("input_tokens"),
+                "outputTokens": payload.get("output_tokens"),
+                "totalCost": payload.get("total_cost"),
+            }
+            item["usage"] = usage
+
+        event_items.append(item)
+        
+    event_items.append({
+        "type": "message.delta",
+        "content": msg.content,
+        "timestamp": _format_utc_datetime(msg.created_at),
+    })
+
+    result: dict[str, Any] = {
+        "id": msg.id,
+        "role": msg.role,
+        "content": msg.content,
+        "timestamp": _format_utc_datetime(msg.created_at),
+        "events": event_items,
+        "status": msg.status.value if isinstance(msg.status, MessageStatus) else msg.status,
+        "isStreaming": msg.status == MessageStatus.generating,
+    }
+    if tool_calls:
+        result["toolCalls"] = tool_calls
+    if thinking:
+        result["thinking"] = thinking
+    if usage:
+        result["usage"] = usage
+    return result
 
 
 class SqliteRepository:
@@ -209,6 +313,74 @@ class SqliteRepository:
                 .all()
             )
             return [self._to_agent_record(row) for row in rows]
+
+    def list_agents_with_conversations(self) -> list[dict[str, Any]]:
+        with self._session_factory() as session:
+            msg_count_subq = (
+                session.query(
+                    MessageORM.session_id,
+                    func.count(MessageORM.id).label("msg_count"),
+                )
+                .group_by(MessageORM.session_id)
+                .subquery()
+            )
+
+            last_status_subq = (
+                session.query(MessageORM.status)
+                .filter(
+                    MessageORM.session_id == SessionORM.id,
+                    MessageORM.role == "assistant",
+                )
+                .order_by(MessageORM.created_at.desc())
+                .limit(1)
+                .correlate(SessionORM)
+                .scalar_subquery()
+            )
+
+            rows = (
+                session.query(AgentORM, SessionORM, func.coalesce(msg_count_subq.c.msg_count, 0), last_status_subq)
+                .outerjoin(SessionORM, SessionORM.agent_id == AgentORM.id)
+                .outerjoin(msg_count_subq, SessionORM.id == msg_count_subq.c.session_id)
+                .filter(AgentORM.status != AgentStatus.deleted.value)
+                .order_by(
+                    AgentORM.created_at.asc(),
+                    SessionORM.updated_at.desc(),
+                )
+                .all()
+            )
+
+            agents_map: dict[str, dict[str, Any]] = {}
+            for agent_row, session_row, msg_count, last_status in rows:
+                if agent_row.id not in agents_map:
+                    agents_map[agent_row.id] = {
+                        "id": agent_row.id,
+                        "name": agent_row.name,
+                        "description": agent_row.description,
+                        "sandbox_type": agent_row.sandbox_type,
+                        "adapter_type": agent_row.adapter_type,
+                        "status": agent_row.status,
+                        "sandbox_id": agent_row.sandbox_id,
+                        "workspace_path": agent_row.workspace_path,
+                        "idle_timeout_seconds": agent_row.idle_timeout_seconds,
+                        "has_scheduled_tasks": agent_row.has_scheduled_tasks,
+                        "created_at": agent_row.created_at,
+                        "updated_at": agent_row.updated_at,
+                        "conversations": [],
+                    }
+                if session_row is not None:
+                    agents_map[agent_row.id]["conversations"].append({
+                        "id": session_row.id,
+                        "agent_id": session_row.agent_id,
+                        "title": session_row.title,
+                        "pinned": session_row.pinned,
+                        "status": session_row.status.value if isinstance(session_row.status, SessionStatus) else str(session_row.status),
+                        "message_count": msg_count,
+                        "last_message_status": last_status.value if isinstance(last_status, MessageStatus) else last_status,
+                        "created_at": session_row.created_at,
+                        "updated_at": session_row.updated_at,
+                    })
+
+            return list(agents_map.values())
 
     def update_agent_status(
         self,
@@ -336,6 +508,7 @@ class SqliteRepository:
         role: str,
         content: str,
         metadata_json: dict[str, Any] | None = None,
+        status: MessageStatus = MessageStatus.completed,
     ) -> str:
         with self._session_factory() as session:
             row = MessageORM(
@@ -345,6 +518,7 @@ class SqliteRepository:
                 role=role,
                 content=content,
                 metadata_json=dict(metadata_json or {}),
+                status=status,
             )
             session.add(row)
             session.commit()
@@ -415,6 +589,88 @@ class SqliteRepository:
             session.commit()
             return row.id
 
+    def update_message_content(self, message_id: str, content: str) -> None:
+        with self._session_factory() as session:
+            session.query(MessageORM).filter(
+                MessageORM.id == message_id
+            ).update(
+                {MessageORM.content: content},
+                synchronize_session=False,
+            )
+            session.commit()
+
+    def update_message_stream_at(self, message_id: str) -> None:
+        with self._session_factory() as session:
+            session.query(MessageORM).filter(
+                MessageORM.id == message_id
+            ).update(
+                {MessageORM.last_stream_at: datetime.now(timezone.utc)},
+                synchronize_session=False,
+            )
+            session.commit()
+
+    def update_message_status(self, message_id: str, status: MessageStatus) -> None:
+        with self._session_factory() as session:
+            session.query(MessageORM).filter(
+                MessageORM.id == message_id,
+                MessageORM.status == MessageStatus.generating,
+            ).update(
+                {MessageORM.status: status},
+                synchronize_session=False,
+            )
+            session.commit()
+
+    def find_stale_generating_messages(
+        self, stale_threshold_seconds: int
+    ) -> list[MessageORM]:
+        from datetime import timedelta
+
+        threshold = datetime.now(timezone.utc) - timedelta(
+            seconds=stale_threshold_seconds
+        )
+        with self._session_factory() as session:
+            return (
+                session.query(MessageORM)
+                .filter(
+                    MessageORM.status == MessageStatus.generating,
+                    MessageORM.last_stream_at < threshold,
+                )
+                .all()
+            )
+
+    def find_generating_message_for_session(self, session_id: str) -> MessageORM | None:
+        with self._session_factory() as session:
+            return (
+                session.query(MessageORM)
+                .filter(
+                    MessageORM.session_id == session_id,
+                    MessageORM.status == MessageStatus.generating,
+                )
+                .first()
+            )
+
+    def compact_message_delta_events(self, message_id: str) -> None:
+        BATCH = 500
+        with self._session_factory() as session:
+            while True:
+                subq = (
+                    session.query(MessageEventORM.id)
+                    .filter(
+                        MessageEventORM.message_id == message_id,
+                        MessageEventORM.event_type == "message.delta",
+                    )
+                    .limit(BATCH)
+                    .subquery()
+                )
+                deleted = (
+                    session.query(MessageEventORM)
+                    .filter(MessageEventORM.id.in_(subq))
+                    .delete(synchronize_session=False)
+                )
+                if deleted == 0:
+                    break
+                session.commit()
+
     def _get_next_message_event_seq(self, *, session_id: str) -> int:
         with self._session_factory() as session:
             max_seq_no = (
@@ -455,6 +711,153 @@ class SqliteRepository:
             "uq_message_events_session_seq" in message
             or "message_events.session_id, message_events.seq_no" in message
         )
+
+    def get_message_count(self, session_id: str) -> int:
+        with self._session_factory() as session:
+            return (
+                session.query(func.count(MessageORM.id))
+                .filter(MessageORM.session_id == session_id)
+                .scalar()
+            ) or 0
+
+    def get_last_assistant_status(self, session_id: str) -> str | None:
+        with self._session_factory() as session:
+            row = (
+                session.query(MessageORM)
+                .filter(
+                    MessageORM.session_id == session_id,
+                    MessageORM.role == "assistant",
+                )
+                .order_by(MessageORM.created_at.desc())
+                .first()
+            )
+            if row is None:
+                return None
+            return row.status.value if isinstance(row.status, MessageStatus) else row.status
+
+    def get_first_user_message(self, session_id: str) -> str | None:
+        with self._session_factory() as session:
+            row = (
+                session.query(MessageORM)
+                .filter(MessageORM.session_id == session_id, MessageORM.role == "user")
+                .order_by(MessageORM.created_at.asc())
+                .first()
+            )
+            if row is None:
+                return None
+            return row.content
+
+    def update_session_metadata(
+        self,
+        session_id: str,
+        *,
+        title: str | None = None,
+        pinned: bool | None = None,
+    ) -> SessionRecord:
+        with self._session_factory() as session:
+            row = session.get(SessionORM, session_id)
+            if row is None:
+                raise KeyError(f"Session not found: {session_id}")
+            if title is not None:
+                row.title = title
+            if pinned is not None:
+                row.pinned = pinned
+            row.updated_at = datetime.now(timezone.utc)
+            session.commit()
+            session.refresh(row)
+            return self._to_session_record(row)
+
+    def list_sessions_with_summary(self, agent_id: str) -> list[dict[str, Any]]:
+        with self._session_factory() as session:
+            msg_count_subq = (
+                session.query(
+                    MessageORM.session_id,
+                    func.count(MessageORM.id).label("msg_count"),
+                )
+                .group_by(MessageORM.session_id)
+                .subquery()
+            )
+
+            last_status_subq = (
+                session.query(MessageORM.status)
+                .filter(
+                    MessageORM.session_id == SessionORM.id,
+                    MessageORM.role == "assistant",
+                )
+                .order_by(MessageORM.created_at.desc())
+                .limit(1)
+                .correlate(SessionORM)
+                .scalar_subquery()
+            )
+
+            rows = (
+                session.query(
+                    SessionORM,
+                    func.coalesce(msg_count_subq.c.msg_count, 0),
+                    last_status_subq,
+                )
+                .outerjoin(msg_count_subq, SessionORM.id == msg_count_subq.c.session_id)
+                .filter(SessionORM.agent_id == agent_id)
+                .order_by(SessionORM.updated_at.desc())
+                .all()
+            )
+            result = []
+            for row, msg_count, last_status in rows:
+                result.append({
+                    "id": row.id,
+                    "agent_id": row.agent_id,
+                    "title": row.title,
+                    "pinned": row.pinned,
+                    "status": row.status.value if isinstance(row.status, SessionStatus) else row.status,
+                    "message_count": msg_count,
+                    "last_message_status": last_status.value if isinstance(last_status, MessageStatus) else last_status,
+                    "created_at": row.created_at,
+                    "updated_at": row.updated_at,
+                })
+            return result
+
+    def get_messages_with_events(
+        self, session_id: str, limit: int = 20, before: str | None = None
+    ) -> tuple[list[dict[str, Any]], bool]:
+        with self._session_factory() as session:
+            query = session.query(MessageORM).filter(
+                MessageORM.session_id == session_id
+            )
+            if before is not None:
+                cursor_dt = datetime.fromisoformat(before)
+                query = query.filter(MessageORM.created_at < cursor_dt)
+
+            messages = (
+                query.order_by(MessageORM.created_at.desc())
+                .limit(limit + 1)
+                .all()
+            )
+
+            has_more = len(messages) > limit
+            messages = messages[:limit]
+            messages.reverse()
+
+            if not messages:
+                return [], False
+
+            message_ids = [m.id for m in messages]
+            all_events = (
+                session.query(MessageEventORM)
+                .filter(MessageEventORM.message_id.in_(message_ids))
+                .order_by(MessageEventORM.seq_no.asc())
+                .all()
+            )
+            events_by_message: dict[str, list[MessageEventORM]] = {}
+            for evt in all_events:
+                if evt.message_id not in events_by_message:
+                    events_by_message[evt.message_id] = []
+                events_by_message[evt.message_id].append(evt)
+
+            result = []
+            for msg in messages:
+                evt_rows = events_by_message.pop(msg.id, [])
+                result.append(_assemble_message(msg, evt_rows))
+            return result, has_more
 
     def delete_agent(self, agent_id: str) -> None:
         with self._session_factory() as session:
@@ -515,6 +918,8 @@ class SqliteRepository:
             status=row.status.value
             if isinstance(row.status, SessionStatus)
             else row.status,
+            title=row.title,
+            pinned=row.pinned,
             created_at=row.created_at,
             updated_at=row.updated_at,
         )
@@ -536,7 +941,6 @@ class SqliteRepository:
         provider: str,
         api_key: str,
         api_base_url: str | None = None,
-        description: str = "",
         enabled: bool = True,
         max_tokens: int = 4096,
         temperature: float = 0.7,
@@ -548,7 +952,6 @@ class SqliteRepository:
             provider=provider,
             api_key=api_key,
             api_base_url=api_base_url,
-            description=description,
             enabled=enabled,
             max_tokens=max_tokens,
             temperature=temperature,
@@ -563,7 +966,6 @@ class SqliteRepository:
         provider: str,
         api_key: str,
         api_base_url: str | None = None,
-        description: str = "",
         enabled: bool = True,
         max_tokens: int = 4096,
         temperature: float = 0.7,
@@ -576,7 +978,6 @@ class SqliteRepository:
                 provider=provider,
                 api_key=api_key,
                 api_base_url=api_base_url,
-                description=description,
                 enabled=enabled,
                 max_tokens=max_tokens,
                 temperature=temperature,
@@ -607,6 +1008,44 @@ class SqliteRepository:
             session.delete(row)
             session.commit()
 
+    def update_model(
+        self,
+        model_id: str,
+        *,
+        name: str | None = None,
+        provider: str | None = None,
+        api_key: str | None = None,
+        api_base_url: str | None = None,
+        enabled: bool | None = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        is_default: bool | None = None,
+    ) -> ModelRecord:
+        with self._session_factory() as session:
+            row = session.get(ModelORM, model_id)
+            if row is None:
+                raise KeyError(f"Model not found: {model_id}")
+            if name is not None:
+                row.name = name
+            if provider is not None:
+                row.provider = provider
+            if api_key is not None:
+                row.api_key = api_key
+            if api_base_url is not None:
+                row.api_base_url = api_base_url
+            if enabled is not None:
+                row.enabled = enabled
+            if max_tokens is not None:
+                row.max_tokens = max_tokens
+            if temperature is not None:
+                row.temperature = temperature
+            if is_default is not None:
+                row.is_default = is_default
+            row.updated_at = datetime.now(timezone.utc)
+            session.commit()
+            session.refresh(row)
+            return self._to_model_record(row)
+
     @staticmethod
     def _to_model_record(row: ModelORM) -> ModelRecord:
         return ModelRecord(
@@ -615,7 +1054,6 @@ class SqliteRepository:
             provider=row.provider,
             api_key=row.api_key,
             api_base_url=row.api_base_url,
-            description=row.description,
             enabled=row.enabled,
             max_tokens=row.max_tokens,
             temperature=row.temperature,

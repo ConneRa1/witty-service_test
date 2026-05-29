@@ -517,8 +517,14 @@ def _get_adaptor_endpoint(self, agent_id: str, session_id: str) -> AdaptorEndpoi
 | `GET /agents/{agent_id}/sessions/{session_id}` | 以 witty-agent-server 为主，透传 `GET /v1/agent/sessions/{session_id}` | 获取会话详情：存储到本地缓存 |
 | `DELETE /agents/{agent_id}/sessions/{session_id}` | 调用 `DELETE /v1/agent/sessions/{session_id}` | 删除会话：透传删除，删除本地缓存记录 |
 | `GET /agents/{agent_id}/sessions/{session_id}/events` | 调用 `GET /v1/agent/sessions/{session_id}/events` | 事件回放：透传到 witty-agent-server |
+| `POST /agents/{agent_id}/sessions/{session_id}/abort` | 调用 `POST /v1/agent/sessions/{session_id}/abort` | 中止会话：中止正在运行的会话 |
+| `GET /agents/{agent_id}/conversations` | NA | 列出会话摘要：查询本地数据库，返回会话列表及最新消息摘要 |
+| `GET /agents/{agent_id}/conversations/{session_id}` | NA | 获取会话详情：查询本地数据库，支持消息分页（limit/before） |
+| `PATCH /agents/{agent_id}/conversations/{session_id}` | NA | 更新会话元数据：修改标题、置顶状态，仅更新本地数据库 |
 | `POST /agents/{agent_id}/sessions/{session_id}/messages` | WebSocket `/v1/sessions/{session_id}/ws`<br>发送: `{"type": "message.create", "payload": {"message": "..."}}` | 非流式消息，通过 WebSocket 通信 |
 | `POST /agents/{agent_id}/sessions/{session_id}/messages/stream` | WebSocket `/v1/sessions/{session_id}/ws`<br>发送: `{"type": "message.create", "payload": {"message": "..."}}` | SSE 流式消息，通过 WebSocket 通信 |
+| `POST /agents/{agent_id}/sessions/{session_id}/messages/stream/reconnect` | WebSocket `/v1/sessions/{session_id}/ws` | SSE 流重连：重新连接到已有消息流，通过 WebSocket 接收事件 |
+| `GET /agents/{agent_id}/skills/installed` | NA | 查询已安装技能：查询本地数据库，返回 agent 已安装的技能列表 |
 
 **说明：**
 - witty-service 通过 **SandboxBackend 抽象层** 管理 witty-agent-server 的生命周期

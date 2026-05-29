@@ -12,6 +12,9 @@ from witty_service.api.auth import require_bearer_auth
 from witty_service.api.schemas import (
     AgentResponse,
     AgentSkillResponse,
+    AgentWithConversationsResponse,
+    ConversationDetailResponse,
+    ConversationSummaryResponse,
     CreateAgentRequest,
     InstallAgentSkillRequest,
     UninstallAgentSkillRequest,
@@ -19,6 +22,7 @@ from witty_service.api.schemas import (
     SendMessageRequest,
     SessionEventsResponse,
     SessionResponse,
+    UpdateConversationRequest,
 )
 from witty_service.api.services import ServiceContainer
 from witty_service.application.agent_manager import AGENT_NOT_FOUND, SKILL_NOT_FOUND, \
@@ -61,12 +65,49 @@ def create_agent(
         if sandbox_state is not None:
             process_port = sandbox_state.sandbox_payload_json.get("metadata", {}).get("port")
 
-    return _to_agent_response(result.agent, default_session_id=result.default_session.id, process_port=process_port)
+    return _to_agent_response(result.agent, default_session_id=None, process_port=process_port)
 
 
-@router.get("", response_model=list[AgentResponse])
-def list_agents(services: ServiceContainer = Depends(get_services)) -> list[AgentResponse]:
-    """列出 agent，并补充默认会话与 runtime skills 信息。"""
+@router.get("", response_model=list[AgentResponse] | list[AgentWithConversationsResponse])
+def list_agents(
+    include_conversations: bool = False,
+    services: ServiceContainer = Depends(get_services),
+) -> list[AgentResponse] | list[AgentWithConversationsResponse]:
+    """列出 agent，并补充默认会话与 runtime skills 信息。
+
+    当 ``include_conversations=true`` 时，每个agent会附带其conversations摘要
+    """
+    if include_conversations:
+        enriched = services.repository.list_agents_with_conversations()
+        result = []
+        for item in enriched:
+            manager = services.get_agent_manager_for_agent(item["id"])
+            agent = manager._check_and_update_agent_status_if_needed(item["id"])
+
+            process_port: int | None = None
+            if agent.sandbox_type == "local_process" and agent.status != AgentStatus.error:
+                sandbox_state = services.repository.get_sandbox_state(agent.id)
+                if sandbox_state is not None:
+                    process_port = sandbox_state.sandbox_payload_json.get("metadata", {}).get("port")
+
+            sessions = services.session_manager.list_sessions(agent.id)
+            default_session_id = sessions[0].id if sessions else None
+            skills = _safe_list_agent_skills(manager=manager, agent=agent)
+
+            base = _to_agent_response(
+                agent,
+                default_session_id=default_session_id,
+                process_port=process_port,
+                skills=skills,
+            )
+            result.append(
+                AgentWithConversationsResponse(
+                    **base.model_dump(),
+                    conversations=[ConversationSummaryResponse(**c) for c in item["conversations"]],
+                )
+            )
+        return result
+
     agents = services.repository.list_agents()
     result = []
     for agent in agents:
@@ -136,6 +177,64 @@ async def delete_agent(agent_id: str, services: ServiceContainer = Depends(get_s
     manager = services.get_agent_manager_for_agent(agent_id)
     await manager.delete_agent(agent_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/{agent_id}/conversations", response_model=list[ConversationSummaryResponse])
+def list_conversations(
+    agent_id: str,
+    services: ServiceContainer = Depends(get_services),
+) -> list[ConversationSummaryResponse]:
+    summaries = services.repository.list_sessions_with_summary(agent_id)
+    return [ConversationSummaryResponse(**s) for s in summaries]
+
+
+@router.get("/{agent_id}/conversations/{session_id}", response_model=ConversationDetailResponse)
+def get_conversation(
+    agent_id: str,
+    session_id: str,
+    limit: int = 50,
+    before: str | None = None,
+    services: ServiceContainer = Depends(get_services),
+) -> ConversationDetailResponse:
+    session = services.session_manager.get_session(agent_id, session_id)
+    messages, has_more = services.repository.get_messages_with_events(
+        session_id, limit=limit, before=before
+    )
+    return ConversationDetailResponse(
+        id=session.id,
+        agent_id=session.agent_id,
+        title=session.title,
+        pinned=session.pinned,
+        status=session.status,
+        messages=messages,
+        has_more=has_more,
+        created_at=session.created_at,
+        updated_at=session.updated_at,
+    )
+
+
+@router.patch("/{agent_id}/conversations/{session_id}", response_model=SessionResponse)
+def update_conversation(
+    agent_id: str,
+    session_id: str,
+    payload: UpdateConversationRequest,
+    services: ServiceContainer = Depends(get_services),
+) -> SessionResponse:
+    services.session_manager.get_session(agent_id, session_id)
+    updated = services.repository.update_session_metadata(
+        session_id,
+        title=payload.title,
+        pinned=payload.pinned,
+    )
+    return SessionResponse(
+        id=updated.id,
+        agent_id=updated.agent_id,
+        status=updated.status,
+        title=updated.title,
+        pinned=updated.pinned,
+        created_at=updated.created_at,
+        updated_at=updated.updated_at,
+    )
 
 
 @router.post("/{agent_id}/pause", response_model=AgentResponse)
@@ -274,28 +373,25 @@ async def send_message_stream(
         session_id=session_id,
         content=payload.content,
     )
-    first_event = await _prefetch_first_event(event_stream)
+    return await _build_sse_streaming_response(event_stream)
 
-    async def stream() -> AsyncIterator[str]:
-        try:
-            if first_event is None:
-                return
-    
-            yield _format_sse_data(first_event)
-            if first_event["event"]["type"] in {"message.completed", "turn.completed"}:
-                return
 
-            async for event in event_stream:
-                yield _format_sse_data(event)
-                if event["event"]["type"] in {"message.completed", "turn.completed"}:
-                    return
+@router.post(
+    "/{agent_id}/sessions/{session_id}/messages/stream/reconnect",
+    response_class=StreamingResponse,
+)
+async def reconnect_message_stream(
+    agent_id: str,
+    session_id: str,
+    services: ServiceContainer = Depends(get_services),
+) -> StreamingResponse:
+    manager = services.get_agent_manager_for_agent(agent_id)
+    event_stream = manager.reconnect_stream(
+        agent_id=agent_id,
+        session_id=session_id,
+    )
+    return await _build_sse_streaming_response(event_stream)
 
-        except (GeneratorExit, asyncio.CancelledError): 
-            if hasattr(event_stream, "aclose"): 
-                await event_stream.aclose() 
-            raise
-
-    return StreamingResponse(stream(), media_type="text/event-stream")
 
 
 @router.post("/{agent_id}/skills/", response_model=AgentSkillResponse, status_code=status.HTTP_202_ACCEPTED)
@@ -498,6 +594,29 @@ def _safe_list_agent_skills(manager: Any, agent: AgentRecord) -> list[dict[str, 
     except Exception:
         logger.warning("Failed to fetch agent skills, fallback to empty list: agent_id=%s", agent.id, exc_info=True)
         return []
+
+
+async def _build_sse_streaming_response(event_stream: AsyncIterator[dict[str, Any]]) -> StreamingResponse:
+    first_event = await _prefetch_first_event(event_stream)
+
+    async def stream() -> AsyncIterator[str]:
+        try:
+            if first_event is None:
+                return
+
+            yield _format_sse_data(first_event)
+            if first_event["event"]["type"] in {"message.completed", "turn.completed"}:
+                return
+
+            async for event in event_stream:
+                yield _format_sse_data(event)
+
+        except (GeneratorExit, asyncio.CancelledError):
+            if hasattr(event_stream, "aclose"):
+                await event_stream.aclose()
+            raise
+
+    return StreamingResponse(stream(), media_type="text/event-stream")
 
 
 def _format_sse_data(event: dict[str, Any]) -> str:

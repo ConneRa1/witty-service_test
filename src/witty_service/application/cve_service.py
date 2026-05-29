@@ -13,17 +13,25 @@ from witty_service.api.services import ServiceContainer
 from witty_service.domain.errors import DomainError
 
 
+CVE_CLONE_DIR = "~/Image"
+CVE_ISSUE_URL = "https://gitcode.com/src-openeuler/kernel/issues"
+
+
 def _default_config() -> dict[str, str]:
     return {
         "gitcode_token": "",
         "signer_name": "",
         "signer_email": "",
-        "clone_dir": "/home/dev/Image",
+        "clone_dir": CVE_CLONE_DIR,
         "branches": "OLK-6.6,OLK-5.10",
         "fork_repo_url": "",
-        "issue_url": "https://gitcode.com/src-openeuler/kernel/issues",
+        "issue_url": CVE_ISSUE_URL,
         "repo_url": "https://gitcode.com/openeuler/kernel",
     }
+
+
+def _clone_dir_path(clone_dir: str) -> Path:
+    return Path(clone_dir.strip()).expanduser()
 
 
 class CveService:
@@ -56,15 +64,19 @@ class CveService:
         for key in config:
             value = loaded.get(key, "")
             config[key] = value if isinstance(value, str) else ""
+        config["clone_dir"] = CVE_CLONE_DIR
+        config["issue_url"] = CVE_ISSUE_URL
         return config
 
     def update_config(self, payload: dict[str, str]) -> None:
         config = self.get_config()
         for key in config:
-            if key == "gitcode_token":
+            if key in {"gitcode_token", "clone_dir", "issue_url"}:
                 continue
             value = payload.get(key, "")
             config[key] = value.strip() if isinstance(value, str) else ""
+        config["clone_dir"] = CVE_CLONE_DIR
+        config["issue_url"] = CVE_ISSUE_URL
 
         self._config_path.parent.mkdir(parents=True, exist_ok=True)
         self._config_path.write_text(
@@ -209,7 +221,7 @@ class CveService:
                     else:
                         parts = stem.rsplit("_", 1)
                         if len(parts) == 2 and clone_dir.strip():
-                            clone_candidate = Path(clone_dir.strip()) / f"commit_patch_{parts[1]}"
+                            clone_candidate = _clone_dir_path(clone_dir) / f"commit_patch_{parts[1]}"
                             if clone_candidate.exists():
                                 original_path = str(clone_candidate)
                 original_status = "已获取" if original_path and Path(original_path).exists() else "missing"

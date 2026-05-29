@@ -77,6 +77,20 @@ def create_app(*, services: ServiceContainer | None = None) -> FastAPI:
             daemon=True,
         ).start()
 
+    @app.on_event("startup")
+    def recover_stale_generations() -> None:
+        from witty_service.persistence.orm import MessageStatus
+        repository = app.state.services.repository
+        stale = repository.find_stale_generating_messages(stale_threshold_seconds=30)
+        for msg in stale:
+            try:
+                repository.update_message_status(msg.id, MessageStatus.interrupted)
+                logger.info("Recovered stale generating message: %s", msg.id)
+            except Exception:
+                logger.warning(
+                    "Failed to recover stale message: %s", msg.id, exc_info=True
+                )
+
     app.include_router(agents_router)
     app.include_router(cve_router)
     app.include_router(models_router)

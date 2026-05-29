@@ -10,6 +10,7 @@ from sqlalchemy import (
     DateTime,
     Enum as SQLEnum,
     ForeignKey,
+    Index,
     Integer,
     JSON,
     String,
@@ -31,6 +32,13 @@ class SessionStatus(str, Enum):
     running = "running"
     idle = "idle"
     error = "error"
+
+
+class MessageStatus(str, Enum):
+    generating = "generating"
+    completed = "completed"
+    error = "error"
+    interrupted = "interrupted"
 
 
 class AgentORM(Base):
@@ -99,6 +107,8 @@ class SessionORM(Base):
         nullable=False,
         default=SessionStatus.idle,
     )
+    title: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    pinned: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -114,6 +124,10 @@ class SessionORM(Base):
 
 class MessageORM(Base):
     __tablename__ = "messages"
+    __table_args__ = (
+        Index("ix_messages_session_created", "session_id", "created_at"),
+        Index("ix_messages_session_status", "session_id", "status"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     agent_id: Mapped[str] = mapped_column(
@@ -131,6 +145,20 @@ class MessageORM(Base):
     role: Mapped[str] = mapped_column(String(16), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    status: Mapped[MessageStatus] = mapped_column(
+        SQLEnum(
+            MessageStatus,
+            native_enum=False,
+            validate_strings=True,
+            create_constraint=True,
+            name="message_status",
+        ),
+        nullable=False,
+        default=MessageStatus.completed,
+    )
+    last_stream_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -142,6 +170,7 @@ class MessageEventORM(Base):
     __tablename__ = "message_events"
     __table_args__ = (
         UniqueConstraint("session_id", "seq_no", name="uq_message_events_session_seq"),
+        Index("ix_message_events_msg_seq", "message_id", "seq_no"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
@@ -192,7 +221,6 @@ class ModelORM(Base):
     provider: Mapped[str] = mapped_column(String(32), nullable=False)
     api_key: Mapped[str] = mapped_column(Text, nullable=False)
     api_base_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     max_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=4096)
     temperature: Mapped[float] = mapped_column(Integer, nullable=False, default=7)

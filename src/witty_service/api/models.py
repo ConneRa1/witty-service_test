@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Request, Response, status
 
 from witty_service.api.auth import require_bearer_auth
-from witty_service.api.schemas import CreateModelRequest, ModelResponse
+from witty_service.api.schemas import CreateModelRequest, ModelResponse, UpdateModelRequest
 from witty_service.api.services import ServiceContainer
 from witty_service.domain.errors import DomainError
 from witty_service.persistence.repositories import ModelRecord
@@ -45,7 +45,6 @@ def create_model(
         provider=payload.provider,
         api_key=payload.api_key,
         api_base_url=api_base_url,
-        description=payload.description,
         enabled=payload.enabled,
         max_tokens=payload.max_tokens,
         temperature=payload.temperature,
@@ -76,13 +75,42 @@ def delete_model(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+@router.put("/{model_id}", response_model=ModelResponse)
+def update_model(
+    model_id: str,
+    payload: UpdateModelRequest,
+    services: ServiceContainer = Depends(get_services),
+) -> ModelResponse:
+    model = services.repository.get_model(model_id)
+    if model is None:
+        raise DomainError(
+            code=MODEL_NOT_FOUND,
+            message="Model was not found.",
+            details={"model_id": model_id},
+        )
+    api_base_url = payload.api_base_url
+    if api_base_url is None and payload.provider is not None:
+        api_base_url = DEFAULT_API_BASE_URLS.get(payload.provider)
+    updated_model = services.repository.update_model(
+        model_id=model_id,
+        name=payload.name,
+        provider=payload.provider,
+        api_key=payload.api_key,
+        api_base_url=api_base_url,
+        enabled=payload.enabled,
+        max_tokens=payload.max_tokens,
+        temperature=payload.temperature,
+        is_default=payload.is_default,
+    )
+    return _to_model_response(updated_model)
+
+
 def _to_model_response(model: ModelRecord) -> ModelResponse:
     return ModelResponse(
         id=model.id,
         name=model.name,
         provider=model.provider,
         api_base_url=model.api_base_url,
-        description=model.description,
         enabled=model.enabled,
         max_tokens=model.max_tokens,
         temperature=model.temperature,
