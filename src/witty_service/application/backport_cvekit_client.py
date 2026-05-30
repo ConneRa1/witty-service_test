@@ -33,11 +33,10 @@ class BackportCvekitClient:
         self,
         *,
         runs_root: str | Path,
-        agent_spec_path: str | Path | None = None,
+        openclaw_config_path: str | Path | None = None,
     ) -> None:
         self._runs_root = Path(runs_root).expanduser().resolve()
-        self._agent_spec_path = self._resolve_spec_path(agent_spec_path)
-        self._llm_config: dict[str, str] | None = None
+        self._openclaw_config_path = self._resolve_openclaw_config_path(openclaw_config_path)
 
     # ── 初始化 ──────────────────────────────────────────────────
 
@@ -54,71 +53,130 @@ class BackportCvekitClient:
                 return path
         raise RuntimeError("cvekit 不在 PATH 中")
 
-    def _resolve_spec_path(self, hint: str | Path | None) -> Path:
-        candidates: list[Path] = []
-        if hint:
-            candidates.append(Path(hint))
-        env_val = os.environ.get("WITTY_AGENT_SPEC_PATH")
-        if env_val:
-            candidates.append(Path(env_val))
-        candidates.append(Path("~/witty-workspace/agent-config/agent-spec.yaml"))
-        candidates.append(Path("~/.openclaw/workspace/agent-spec.yaml"))
+    def _resolve_openclaw_config_path(self, config_path: str | Path | None) -> Path:
+        path = config_path or os.environ.get("OPENCLAW_CONFIG_PATH") or "~/.openclaw/openclaw.json"
+        return Path(path).expanduser().resolve(strict=False)
 
-        for c in candidates:
-            resolved = c.expanduser().resolve(strict=False)
-            if resolved.exists():
-                return resolved
-        return candidates[0].expanduser().resolve(strict=False)
-
-    # ── LLM 配置（懒加载 + 缓存）──────────────────────────────
+    # ── LLM 配置 ───────────────────────────────────────────────
 
     def _get_llm_config(self) -> dict[str, str]:
-        if self._llm_config is not None:
-            return self._llm_config
-
-        spec_path = self._agent_spec_path
+        config_path = self._openclaw_config_path
         try:
-            with spec_path.open("r", encoding="utf-8") as handle:
-                spec = yaml.safe_load(handle) or {}
+            with config_path.open("r", encoding="utf-8") as handle:
+                config = json.load(handle)
         except Exception as error:
-            raise RuntimeError(f"读取 agent-spec.yaml 失败: {error}") from error
+            raise RuntimeError(f"读取 openclaw.json 失败: {error}") from error
+        if not isinstance(config, dict):
+            raise RuntimeError(f"openclaw.json 顶层必须是对象: {config_path}")
 
-        models = spec.get("model")
-        if not isinstance(models, list) or not models:
-            raise RuntimeError(f"agent-spec.yaml 中缺少 model 配置: {spec_path}")
+        mcp_config = ((config.get("mcp") or {}).get("servers") or {}).get("cvekit_mcp")
+        if not isinstance(mcp_config, dict):
+            mcp_config = ((config.get("mcpServers") or {}).get("cvekit_mcp") or {})
+        if not isinstance(mcp_config, dict):
+            raise RuntimeError(f"openclaw.json 中缺少 cvekit_mcp 配置: {config_path}")
 
-        selected = None
-        for item in models:
-            if isinstance(item, dict) and item.get("is_primary") is True:
-                selected = item
-                break
-        if selected is None:
-            for item in models:
-                if isinstance(item, dict):
-                    selected = item
+        args = mcp_config.get("args") or []
+        if not isinstance(args, list):
+            args = []
+        env_config = mcp_config.get("env") or {}
+        if not isinstance(env_config, dict):
+            env_config = {}
+
+        arg_values: dict[str, str] = {}
+        option_names = {
+            "--llm-provider",
+            "--api-key",
+            "--llm-base-url",
+            "--llm-model-name",
+        }
+        index = 0
+        while index < len(args):
+            item = str(args[index]).strip()
+            if item in option_names and index + 1 < len(args):
+                value = str(args[index + 1]).strip()
+                if value:
+                    arg_values[item] = value
+                index += 2
+                continue
+            for option_name in option_names:
+                prefix = f"{option_name}="
+                if item.startswith(prefix):
+                    value = item[len(prefix) :].strip()
+                    if value:
+                        arg_values[option_name] = value
                     break
-        if not isinstance(selected, dict):
-            raise RuntimeError(f"agent-spec.yaml 中没有可用的模型配置: {spec_path}")
+            index += 1
 
-        provider = str(selected.get("provider") or "").strip().lower()
-        api_key = str(selected.get("apiKey") or "").strip()
-        if not provider:
-            raise RuntimeError(f"agent-spec.yaml model 缺少 provider: {spec_path}")
+        selected_provider = (
+            arg_values.get("--llm-provider")
+            or str(env_config.get("LLM_PROVIDER") or "").strip()
+        ).lower()
+        api_key = (
+            arg_values.get("--api-key")
+            or str(env_config.get("API_KEY") or "").strip()
+            or str(env_config.get("OPENAI_KEY") or "").strip()
+        )
+        base_url = (
+            arg_values.get("--llm-base-url")
+            or str(env_config.get("LLM_BASE_URL") or "").strip()
+            or str(env_config.get("BASE_URL") or "").strip()
+        )
+        model_name = (
+            arg_values.get("--llm-model-name")
+            or str(env_config.get("LLM_MODEL_NAME") or "").strip()
+            or str(env_config.get("MODEL_NAME") or "").strip()
+        )
+        if not selected_provider:
+            raise RuntimeError(f"openclaw.json cvekit_mcp 缺少 --llm-provider 或 LLM_PROVIDER: {config_path}")
         if not api_key:
-            raise RuntimeError(f"agent-spec.yaml model 缺少 apiKey: {spec_path}")
+            raise RuntimeError(f"openclaw.json cvekit_mcp 缺少 --api-key 或 API_KEY: {config_path}")
 
-        self._llm_config = {"provider": provider, "api_key": api_key}
-        return self._llm_config
+        return {
+            "provider": selected_provider,
+            "api_key": api_key,
+            "base_url": base_url,
+            "model_name": model_name,
+        }
 
     # ── 通用工具 ────────────────────────────────────────────────
 
     def _build_env(self) -> dict[str, str]:
-        env = os.environ.copy()
-        env["API_KEY"] = self._get_llm_config()["api_key"]
+        cvekit_bin_dir = self._resolve_cvekit().parent
+        env: dict[str, str] = {
+            "PATH": os.pathsep.join(
+                [
+                    str(cvekit_bin_dir),
+                    "/usr/local/bin",
+                    "/usr/bin",
+                    "/usr/local/sbin",
+                    "/usr/sbin",
+                ]
+            ),
+        }
+        for key in ("LANG", "LINUX_REPO_USE_CACHE_ONLY"):
+            value = os.environ.get(key)
+            if value:
+                env[key] = value
         return env
 
     def _run_cvekit(self, args: list[str], env: dict[str, str], cwd: Path) -> subprocess.CompletedProcess[str]:
-        cmd = [str(self._resolve_cvekit()), *args]
+        cmd_args = list(args)
+        existing_options = {
+            item.split("=", 1)[0]
+            for item in cmd_args
+            if isinstance(item, str) and item.startswith("--")
+        }
+        llm_config = self._get_llm_config()
+        for option, value in (
+            ("--llm-provider", llm_config.get("provider")),
+            ("--llm-base-url", llm_config.get("base_url")),
+            ("--llm-model-name", llm_config.get("model_name")),
+            ("--api-key", llm_config.get("api_key")),
+        ):
+            if value and option not in existing_options:
+                cmd_args.extend([option, value])
+
+        cmd = [str(self._resolve_cvekit()), *cmd_args]
         result = subprocess.run(
             cmd,
             cwd=str(cwd),
@@ -128,11 +186,30 @@ class BackportCvekitClient:
         if result.returncode != 0:
             raise RuntimeError(
                 "cvekit 执行失败\n"
-                f"command: {' '.join(cmd)}\n"
+                f"command: {' '.join(redacted_cmd)}\n"
                 f"stdout: {result.stdout}\n"
                 f"stderr: {result.stderr}"
             )
         return result
+
+    @staticmethod
+    def _redact_command(cmd: list[str]) -> list[str]:
+        redacted: list[str] = []
+        skip_next = False
+        for item in cmd:
+            if skip_next:
+                redacted.append("***")
+                skip_next = False
+                continue
+            if item == "--api-key":
+                redacted.append(item)
+                skip_next = True
+                continue
+            if item.startswith("--api-key="):
+                redacted.append("--api-key=***")
+                continue
+            redacted.append(item)
+        return redacted
 
     @staticmethod
     def _parse_json_output(output: str) -> dict[str, Any]:
@@ -465,7 +542,6 @@ class BackportCvekitClient:
         target_path: str,
         fallback_reason: str,
     ) -> dict[str, Any]:
-        llm_config = self._get_llm_config()
         env = self._build_env()
 
         self._runs_root.mkdir(parents=True, exist_ok=True)
@@ -479,7 +555,6 @@ class BackportCvekitClient:
         refreshed_path = run_dir / "refresh-backport-batch.yml.report.yml"
 
         raw_config = {key: value for key, value in report_data.items() if key not in {"commits", "refresh_meta"}}
-        raw_config["llm_provider"] = llm_config["provider"]
         raw_config.pop("api_key", None)
         raw_config["commits"] = [
             item for item in (self._normalize_commit_item(commit) for commit in commits) if item
@@ -579,7 +654,6 @@ class BackportCvekitClient:
         signer_name: str,
         signer_email: str,
     ) -> dict[str, Any]:
-        llm_config = self._get_llm_config()
         env = self._build_env()
 
         excel = Path(excel_path).expanduser().resolve()
@@ -606,7 +680,6 @@ class BackportCvekitClient:
         base_config: dict[str, Any] = {
             "project": "linux",
             "target_path": str(target_repo),
-            "llm_provider": llm_config["provider"],
         }
         for key, value in {
             "project_url": project_url,
@@ -794,7 +867,6 @@ class BackportCvekitClient:
         signer_email: str,
         working_report_path: str | None = None,
     ) -> dict[str, Any]:
-        llm_config = self._get_llm_config()
         env = self._build_env()
         base_path = Path(base_report_path).expanduser().resolve()
         if not base_path.exists():
@@ -818,9 +890,32 @@ class BackportCvekitClient:
         if not resolved_commits:
             raise ValueError("selected_commits 解析后为空")
 
+        actionable_commits = [
+            item
+            for item in resolved_commits
+            if item.get("merged_in_target") is not True
+            and item.get("empty_patch") is not True
+            and item.get("equivalent_exists") is not True
+            and str(item.get("status") or "").strip().lower() != "skipped"
+            and str(item.get("merged_in_target") or "").strip().lower() != "skipped"
+        ]
+        if not actionable_commits:
+            return {
+                "operation": "execute_selected",
+                "status": "success",
+                "stage": "interactive_editing",
+                "summary": f"选中的 {len(resolved_commits)} 条 commit 均无需执行",
+                "report": {
+                    "commit_count": len(resolved_commits),
+                    "commits": resolved_commits,
+                },
+                "diagnostics": {
+                    "likely_missing_prerequisite": False,
+                },
+            }
+
         config_data = dict(orig_report)
-        config_data["commits"] = resolved_commits
-        config_data["llm_provider"] = llm_config["provider"]
+        config_data["commits"] = actionable_commits
         config_data.pop("api_key", None)
         if patch_dataset_dir.strip():
             config_data["patch_dataset_dir"] = patch_dataset_dir.strip()
@@ -871,24 +966,43 @@ class BackportCvekitClient:
         base_path = Path(base_report_path).expanduser().resolve()
         if not base_path.exists():
             raise FileNotFoundError(f"base_report_path 不存在: {base_path}")
+        apply_config_path = base_path
+        if working_report_path:
+            candidate_apply_path = Path(working_report_path).expanduser().resolve()
+            if candidate_apply_path.exists():
+                apply_config_path = candidate_apply_path
 
         resolved_row = self._resolve_commit_row(
             row=row,
             base_report_path=base_report_path,
             working_report_path=working_report_path,
         )
+        if (
+            resolved_row.get("merged_in_target") is True
+            or resolved_row.get("empty_patch") is True
+            or resolved_row.get("equivalent_exists") is True
+            or str(resolved_row.get("status") or "").strip().lower() == "skipped"
+            or str(resolved_row.get("merged_in_target") or "").strip().lower() == "skipped"
+        ):
+            return {
+                "operation": "apply_row",
+                "status": "success",
+                "stage": "interactive_editing",
+                "summary": "该提交无需执行",
+                "report": {"commit_count": 1, "commits": [resolved_row]},
+            }
         apply_value = self._resolve_apply_value(resolved_row)
         target_row_id = self._build_row_id(resolved_row)
 
         result = self._run_cvekit(
             ["--action", "backport-batch",
-             "--backport-config", str(base_path), "--debug", "--json",
+             "--backport-config", str(apply_config_path), "--debug", "--json",
              "--apply", apply_value],
-            env, base_path.parent,
+            env, apply_config_path.parent,
         )
         apply_result = self._parse_json_output(result.stdout)
 
-        _, commits = self._read_report(base_path)
+        _, commits = self._read_report(apply_config_path)
         affected_rows = [c for c in commits if isinstance(c, dict) and self._build_row_id(c) == target_row_id] or [resolved_row]
         apply_status = str(apply_result.get("status") or "").strip().lower()
         if apply_status and apply_status != "success":
@@ -949,7 +1063,7 @@ class BackportCvekitClient:
 
     @staticmethod
     def _resolve_apply_value(row: dict[str, Any]) -> str:
-        for key in ("commit", "input_commit", "backported_patch_path", "patch_path", "original_patch_path"):
+        for key in ("backported_patch_path", "patch_path", "original_patch_path", "commit", "input_commit"):
             val = row.get(key)
             if isinstance(val, str) and val.strip():
                 return val.strip()

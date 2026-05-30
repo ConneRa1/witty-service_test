@@ -86,6 +86,10 @@ class BackportService:
             config["current_report_path"],
         )
 
+    @property
+    def config_path(self) -> str:
+        return str(self._config_path)
+
     def browse_path(self, raw_path: str | None = None) -> dict[str, Any]:
         root = Path.home().resolve()
         current_path = Path(raw_path or root).expanduser().resolve()
@@ -97,6 +101,9 @@ class BackportService:
                 message="Backport browse path is outside the allowed root.",
                 details={"path": str(current_path), "root": str(root)},
             ) from exc
+
+        if current_path.is_file():
+            current_path = current_path.parent
 
         if not current_path.is_dir():
             raise DomainError(

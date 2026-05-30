@@ -21,6 +21,7 @@ class BackportConfigPayload(BaseModel):
 
 class BackportConfigUpdateResponse(BaseModel):
     ok: bool
+    config_path: str = ""
 
 
 class BackportRunRequest(BaseModel):

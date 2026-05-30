@@ -40,7 +40,7 @@ def update_config(
     backport_service: BackportService = Depends(get_backport_service),
 ) -> BackportConfigUpdateResponse:
     backport_service.update_config(payload.model_dump())
-    return BackportConfigUpdateResponse(ok=True)
+    return BackportConfigUpdateResponse(ok=True, config_path=backport_service.config_path)
 
 
 @router.get("/browse")
