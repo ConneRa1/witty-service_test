@@ -67,7 +67,7 @@ jobs:
           if [ "${{ inputs.dry_run }}" = "true" ]; then
             semantic-release version --no-commit --no-tag --no-changelog --no-push --no-vcs-release --print
           else
-            semantic-release version
+            semantic-release version --no-commit
           fi
 
       - name: Push tags and sync to GitHub
