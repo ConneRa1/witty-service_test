@@ -30,7 +30,7 @@ jobs:
       - name: Checkout from GitHub
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.GH_TOKEN }}
           fetch-depth: 0
           persist-credentials: true
           fetch-tags: true
@@ -65,7 +65,7 @@ jobs:
       - name: Semantic Release
         id: semantic_release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           VERSION=$(semantic-release version --no-commit --no-tag --no-changelog --no-push --no-vcs-release --print 2>/dev/null | head -1)
           echo "version=$VERSION" >> $GITHUB_OUTPUT
