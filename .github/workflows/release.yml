@@ -1,0 +1,124 @@
+name: Semantic Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Run semantic-release in dry-run mode"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  release:
+    name: Semantic Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency: release
+
+    steps:
+      - name: Checkout from GitHub
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: true
+          fetch-tags: true
+
+      - name: Add GitCode remote and fetch
+        run: |
+          git remote add gitcode https://oauth2:${{ secrets.GITCODE_TOKEN }}@gitcode.com/ConneRa1/witty-service_test.git
+          git fetch gitcode '+refs/heads/*:refs/remotes/gitcode/*' --force
+          git fetch gitcode '+refs/tags/*:refs/tags/*' --force
+          echo "=== Resetting master to GitCode ==="
+          git reset --hard gitcode/master
+          echo "=== Current commit ==="
+          git log --oneline -5
+          echo "=== Tags ==="
+          git tag --list | sort -V
+
+      - name: Configure Git user
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install ".[dev]"
+
+      - name: Semantic Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            semantic-release version --no-commit --no-tag --no-changelog --no-push --no-vcs-release --print
+          else
+            semantic-release version
+          fi
+
+      - name: Push tags and sync to GitHub
+        if: success() && inputs.dry_run != 'true'
+        run: |
+          echo "=== Pushing all tags to GitHub ==="
+          git push origin --tags --force
+          echo "=== Force pushing master to GitHub (sync from GitCode) ==="
+          git push origin master --force
+          echo "=== Remote tags ==="
+          git ls-remote --tags origin | grep -v '\^{}' | sort -V
+
+  build:
+    needs: release
+    if: inputs.dry_run != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install build
+
+      - name: Build package
+        run: python -m build
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
