@@ -2,8 +2,6 @@ name: Semantic Release
 
 on:
   workflow_dispatch:
-  push:
-    branches: [master]
     inputs:
       dry_run:
         description: "Run semantic-release in dry-run mode"

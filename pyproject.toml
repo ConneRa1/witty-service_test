@@ -3,7 +3,7 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "witty-service"
+name = "ws_test"
 version = "0.1.0"
 description = "Witty Service - A service for managing agents and sessions"
 readme = "README.md"
