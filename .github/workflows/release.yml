@@ -67,13 +67,11 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [ "${{ inputs.dry_run }}" = "true" ]; then
-            semantic-release version --no-commit --no-tag --no-changelog --no-push --no-vcs-release --print
-          else
+          VERSION=$(semantic-release version --no-commit --no-tag --no-changelog --no-push --no-vcs-release --print 2>/dev/null | head -1)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "=== Next version: $VERSION ==="
+          if [ "${{ inputs.dry_run }}" != "true" ]; then
             semantic-release version --no-commit
-            VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml)
-            echo "version=$VERSION" >> $GITHUB_OUTPUT
-            echo "=== New version: $VERSION ==="
           fi
 
       - name: Push tags and sync to GitHub
