@@ -1,4 +1,4 @@
-# Witty-Service 端到端测试流程 v0.1.2
+# Witty-Service 端到端测试流程 docs
 
 本文档给出当前 `witty-service` 的完整 E2E（End-to-End）测试方式，覆盖：
 
