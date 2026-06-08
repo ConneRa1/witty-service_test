@@ -65,7 +65,7 @@ jobs:
       - name: Semantic Release
         id: semantic_release
         env:
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           VERSION=$(semantic-release version --no-commit --no-tag --no-changelog --no-push --no-vcs-release --print 2>/dev/null | head -1)
           echo "version=$VERSION" >> $GITHUB_OUTPUT
