@@ -25,6 +25,7 @@ jobs:
     concurrency: release
     outputs:
       version: ${{ steps.semantic_release.outputs.version }}
+      should_release: ${{ steps.semantic_release.outputs.should_release }}
 
     steps:
       - name: Checkout from GitHub
@@ -67,15 +68,24 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
-          VERSION=$(semantic-release version --no-commit --no-tag --no-changelog --no-push --no-vcs-release --print 2>/dev/null | head -1)
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "=== Next version: $VERSION ==="
-          if [ "${{ inputs.dry_run }}" != "true" ]; then
-            semantic-release version --no-commit
+          RELEASE_OUTPUT=$(semantic-release version --no-commit --no-tag --no-changelog --no-push --no-vcs-release --print 2>&1)
+          echo "=== Release output ==="
+          echo "$RELEASE_OUTPUT"
+          if echo "$RELEASE_OUTPUT" | grep -qiE "already been released|no release will be made"; then
+            echo "should_release=false" >> $GITHUB_OUTPUT
+            echo "=== No release will be made, skipping version bump ==="
+          else
+            VERSION=$(echo "$RELEASE_OUTPUT" | grep -oP '\d+\.\d+\.\d+' | head -1)
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            echo "should_release=true" >> $GITHUB_OUTPUT
+            echo "=== Next version: $VERSION ==="
+            if [ "${{ inputs.dry_run }}" != "true" ]; then
+              semantic-release version --no-commit
+            fi
           fi
 
       - name: Push tags and sync to GitHub
-        if: success() && inputs.dry_run != 'true'
+        if: success() && inputs.dry_run != 'true' && steps.semantic_release.outputs.should_release == 'true'
         run: |
           echo "=== Pushing all tags to GitHub ==="
           git push origin --tags --force
@@ -86,7 +96,7 @@ jobs:
 
   build:
     needs: release
-    if: inputs.dry_run != 'true'
+    if: inputs.dry_run != 'true' && needs.release.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
