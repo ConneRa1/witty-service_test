@@ -144,13 +144,6 @@ tag_format = "v{version}"
 match = "(master|main)"
 prerelease = false
 
-[tool.semantic_release.changelog]
-mode = "update"
-
-[tool.semantic_release.changelog.default_templates]
-changelog_file = "CHANGELOG.md"
-output_format = "md"
-
 [tool.semantic_release.commit_parser_options]
 allowed_tags = ["build", "chore", "ci", "docs", "feat", "fix", "perf", "refactor", "style", "test"]
 minor_tags = ["feat"]
